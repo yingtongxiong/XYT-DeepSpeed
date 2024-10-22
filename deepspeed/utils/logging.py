@@ -26,11 +26,11 @@ class LoggerFactory:
 
         def warn_once(record):
             nonlocal warn
-            if is_compile_supported() and torch.compiler.is_compiling() and not warn:
-                warn = True
-                logger.warning("To avoid graph breaks caused by logger in compile-mode, it is recommended to"
-                               " disable logging by setting env var DISABLE_LOGS_WHILE_COMPILING=1")
-            return True
+            # if is_compile_supported() and torch.compiler.is_compiling() and not warn:
+            #     warn = True
+            #     logger.warning("To avoid graph breaks caused by logger in compile-mode, it is recommended to"
+            #                    " disable logging by setting env var DISABLE_LOGS_WHILE_COMPILING=1")
+            # return True
 
         return warn_once
 

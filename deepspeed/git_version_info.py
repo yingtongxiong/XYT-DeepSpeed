@@ -8,9 +8,10 @@ try:
     from .git_version_info_installed import *  # noqa: F401 # type: ignore
 except ModuleNotFoundError:
     import os
-    if os.path.isfile('version.txt'):
+    version_path = '/mnt/petrelfs/xiongyingtong/XYT-DeepSpeed/version.txt'
+    if os.path.isfile(version_path):
         # Will be missing from checkouts that haven't been installed (e.g., readthedocs)
-        version = open('version.txt', 'r').read().strip()
+        version = open(version_path, 'r').read().strip()
     else:
         version = "0.0.0"
     git_hash = '[none]'
