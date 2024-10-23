@@ -9,8 +9,9 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 from einops import rearrange
 
-from flash_attn.layers.rotary import RotaryEmbedding
+# from flash_attn.layers.rotary import RotaryEmbedding
 from flash_attn.modules.mha import FlashSelfAttention, FlashCrossAttention
+from embedding import RotaryEmbedding
 
 def scaled_init_method_normal(sigma: float = 1.0, num_layers: int = 1):
     """Init method based on N(0, sigma/sqrt(2*num_layers)."""
@@ -115,7 +116,6 @@ class MHA(nn.Module):
                 self.rotary_emb_dim,
                 base=rope_base,
                 scale_base=rotary_emb_scale_base,
-                interleaved=self.interleaved,
                 device=device,
             )
 
@@ -143,9 +143,9 @@ class MHA(nn.Module):
             qkv = self.wqkv(x)
             qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, d=self.head_dim)
 
-            q = qkv[:, :, 0].squeeze(2)
-            k = qkv[:, :, 1].squeeze(2)
-            v = qkv[:, :, 2].squeeze(2)
+            # q = qkv[:, :, 0].squeeze(2)
+            # k = qkv[:, :, 1].squeeze(2)
+            # v = qkv[:, :, 2].squeeze(2)
         else:
             q, k, v = self.wq(x), self.wk(x), self.wv(x)
             q = rearrange(q, "b s (h d) -> b s h d", d=self.head_dim)
@@ -153,12 +153,12 @@ class MHA(nn.Module):
             v = rearrange(v, "b s (h d) -> b s h d", d=self.head_dim)
 
         # rotary embedding
-        indexes = kwargs.pop("indexes", 0)
-        max_seqlen = kwargs.get("max_seqlen", None)
-        q = self.rotary_emb(q, seqlen_offset=indexes, max_seqlen=max_seqlen)
-        k = self.rotary_emb(k, seqlen_offset=indexes, max_seqlen=max_seqlen)
+        qkv = self.rotary_emb(qkv, **kwargs)
+        kwargs.pop("indexes")
 
-        context = self.inner_attn(q, k, v, **kwargs)
+        qkv = qkv.squeeze(0)
+        context = self.inner_attn(qkv, **kwargs)
+        context = context.unsqueeze(0)
 
         # wo
         return self.out_proj(rearrange(context, "b s h d -> b s (h d)"))
@@ -209,8 +209,8 @@ class InternLM1Decoder(nn.Module):
         self.dropout1 = nn.Dropout(drop_rate)
         self.dropout2 = nn.Dropout(drop_rate)
 
-        self.norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
-        self.norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
+        self.norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon, device=device)
+        self.norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon, device=device)
 
         self.mlp = FeedForward(
             hidden_size,
@@ -268,7 +268,9 @@ class InternLM1Decoder(nn.Module):
         def _dropout_and_norm_attn(_hidden_states):
             _dropped = self.dropout1(_hidden_states)
             _residual = _dropped
-            _hidden_states = self.norm1(_residual.float())
+            #FIXME: should set norm weight to torch.float32
+            # _hidden_states = self.norm1(_residual.float())
+            _hidden_states = self.norm1(_residual)
             return _residual, _hidden_states
 
         residual, hidden_states = _dropout_and_norm_attn(hidden_states)
@@ -276,12 +278,14 @@ class InternLM1Decoder(nn.Module):
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
 
-        hidden_states = self.mixer(hidden_states)
+        hidden_states = self.mixer(hidden_states, **kwargs)
 
         def _dropout_and_norm_ffn(_residual, _hidden_states):
             _dropped = self.dropout2(_hidden_states)
             _residual = (_dropped + _residual) if _residual is not None else _dropped
-            _hidden_states = self.norm2(_residual.float())
+            #FIXME: should set norm weight to torch.float32
+            # _hidden_states = self.norm2(_residual.float())
+            _hidden_states = self.norm2(_residual)
             return _residual, _hidden_states
 
         residual, hidden_states = _dropout_and_norm_ffn(residual, hidden_states)
@@ -322,7 +326,8 @@ class InternLM1(nn.Module):
         self.embed_grad_scale = embed_grad_scale
         self.parallel_output = parallel_output
 
-        self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=hidden_size)
+        self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=hidden_size, device=device, dtype=dtype)
+
         for _, param in self.embedding.named_parameters():
             normal_(std=0.0052)(param)
 
@@ -348,7 +353,7 @@ class InternLM1(nn.Module):
             ]
         )
 
-        self.norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
+        self.norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon, device=device)
         self.head = nn.Linear(
             in_features=hidden_size,
             out_features=vocab_size,
@@ -372,7 +377,9 @@ class InternLM1(nn.Module):
             hidden_states = block(hidden_states, **kwargs)
 
         if hasattr(self, "norm"):
-            hidden_states = self.norm(hidden_states.float())
+            #FIXME: should set norm weight to torch.float32
+            # hidden_states = self.norm(hidden_states.float())
+            hidden_states = self.norm(hidden_states)
         if hasattr(self, "head"):
             hidden_states = self.head(hidden_states)
 
