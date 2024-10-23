@@ -12,9 +12,8 @@
     "output_path": "output/ds_logs/",
     "job_name": "train_AMSP"
     },
-    "fp16": {
-        "enabled": false,
-        "initial_scale_power": 15
+    "bf16": {
+        "enabled": true
     },
     "zero_optimization": {
         "stage": 1,

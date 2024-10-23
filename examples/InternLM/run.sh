@@ -30,7 +30,7 @@ MODEL_ARGS=" \
     --num-attention-heads 32 \
     --vocab-size 50304 \
     --mlp-ratio 2.5 \
-    --dtype 'torch.bfloat16' \
+    --dtype torch.bfloat16 \
     --parallel-output False \
 "
 
@@ -41,7 +41,7 @@ DATA_ARGS=" \
     --micro-num 1 \
     --rampup-batch-size 1 \
     --fixed_random_dataset_seqlen True \
-    --pack_sample_into_one True \
+    --pack_sample_into_one False \
     --num-worker 4 \
 "
 
