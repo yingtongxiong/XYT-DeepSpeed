@@ -2,10 +2,13 @@ import argparse
 
 import deepspeed
 import torch
+import torch.nn as nn
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from modeling_internlm import InternLM1
 from examples.data.build_dataloader import get_train_dataloader
+from examples.data.process_data import get_batch_data
 
 def print_log(msg):
     global_rank = dist.get_rank()
@@ -17,44 +20,62 @@ def pretrain(args):
     # initialize deepspeed
     deepspeed.init_distributed()
 
-    # # initialize model
-    # print_log(">>building model...")
-    # model = InternLM1(
-    #     num_layers=args.num_layers,
-    #     hidden_size=args.hidden_size,
-    #     num_attention_heads=args.num_attention_heads,
-    #     vocab_size=args.vocab_size,
-    #     mlp_ratio=args.mlp_ratio,
-    #     dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
-    #     parallel_output=args.parallel_output,
-    #     device=torch.cuda.current_device(),
-    # )
-    # print_log(">>after buildin model...")
-    
-    # print_log(">>initialize deepspeed...")
-    # model, _, _, _ = deepspeed.initialize(
-    #                     args=args,
-    #                     model=model,
-    #                     model_parameters=model.parameters(),
-    #                     dist_init_required=True)
-    # print_log(">>after initialize deepspeed...")
-    
-    
+    # initialize model
+    print_log(">>building model...")
+    model = InternLM1(
+        num_layers=args.num_layers,
+        hidden_size=args.hidden_size,
+        num_attention_heads=args.num_attention_heads,
+        vocab_size=args.vocab_size,
+        mlp_ratio=args.mlp_ratio,
+        dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
+        parallel_output=args.parallel_output,
+        device=torch.cuda.current_device(),
+    )
+    print_log(">>after buildin model...")
+
+    print_log(">>initialize deepspeed...")
+    model, _, _, _ = deepspeed.initialize(
+                        args=args,
+                        model=model,
+                        model_parameters=model.parameters(),
+                        dist_init_required=True)
+    print_log(">>after initialize deepspeed...")
+
     # initialize dataloader
     print_log(">>initialize dataloader...")
     data_loader = get_train_dataloader(args)
     print_log(">>after initialize dataloader...")
     
-    # for _, batch in enumerate(data_loader):
-    #     inputs, labels = batch[0].to(model.device), batch[1].to(model.device)
-    #     # forward
-    #     logits = model(inputs)
-    #     # loss
-    #     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-1)
-    #     # backward
-    #     model.backward(loss)
-    #     # update
-    #     model.step()
+    # initialize Loss function
+    print_log(">>initialize loss...")
+    loss_fn = nn.CrossEntropyLoss(
+        ignore_index=-100,
+        reduction="mean",
+        label_smoothing=0,
+    )
+    print_log(">>after initialize loss...")
+    
+    for idx, batch in enumerate(data_loader):
+        
+        input_ids, labels, kwargs = get_batch_data(batch, torch.cuda.current_device())
+        
+        # forward
+        logits = model(input_ids=input_ids, **kwargs)
+        
+        # compute loss
+        shift_logits = logits.contiguous().view(-1, logits.size(-1))
+        shift_labels = labels.contiguous().view(-1)
+        loss = loss_fn(shift_logits, shift_labels)
+
+        # backward
+        model.backward(loss)
+
+        # update
+        model.step()
+        
+        print_log(f"step = {idx}, {loss=}")
+        
 
 
 def parse_args():
