@@ -10,7 +10,7 @@
     "tensorboard": {
     "enabled": true,
     "output_path": "output/ds_logs/",
-    "job_name": "train_AMSP"
+    "job_name": "train_internlm"
     },
     "bf16": {
         "enabled": true
