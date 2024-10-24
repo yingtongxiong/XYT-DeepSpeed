@@ -243,8 +243,10 @@ class DeepSpeedEngine(Module):
         if self.mesh_device:
             groups.mesh_device = self.mesh_device
 
+        # 检查local_rank
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
+        # optimizer相关检查
         self._do_sanity_check()
         see_memory_usage(f"DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         if mpu is not None:
@@ -253,8 +255,10 @@ class DeepSpeedEngine(Module):
                     assert not self.elasticity_enabled(), ("Elasticity is not currently supported"
                                                            " with model parallelism.")
 
+        # 设置local_rank, global_rank, world_size
         self._set_distributed_vars(args)
 
+        # logger相关
         dist.configure(self._config)
 
         self.monitor = MonitorMaster(self._config.monitor_config)
@@ -267,11 +271,13 @@ class DeepSpeedEngine(Module):
         self.pipeline_parallelism = isinstance(model, PipelineModule)
 
         # Configure distributed model
+        # 获取process group，model dtype
         self._configure_distributed_model(model)
 
         # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
         self.param_names = {param: name for name, param in model.named_parameters()}
 
+        # 获取autotuning相关的model info
         self._get_model_parameters()
 
         see_memory_usage(f"DeepSpeed Engine: After configure distributed model")
@@ -290,6 +296,7 @@ class DeepSpeedEngine(Module):
             self.flops_profiler = FlopsProfiler(self.module, self, self.flops_profiler_recompute_fwd_factor())
 
         if training_data:
+            # 初始化deepspeed dataloader
             self.training_dataloader = self.deepspeed_io(training_data)
         else:
             self.training_dataloader = None
@@ -310,14 +317,15 @@ class DeepSpeedEngine(Module):
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
 
-        if has_optimizer:
+        if has_optimizer: # 如果指定了optimizer
+            # 根据config，是naive optimizer还是zero
             self._configure_optimizer(optimizer, model_parameters)
             self._configure_lr_scheduler()
             self._report_progress(0)
-        elif self.zero_optimization():
+        elif self.zero_optimization(): # 如果用了zero
             # no optim selected but zero is enabled
             self.optimizer = self._configure_zero_optimizer(optimizer=None)
-        elif self.bfloat16_enabled():
+        elif self.bfloat16_enabled(): # 如果是bf16
             self.optimizer = self._configure_bf16_optimizer(optimizer=None)
 
         # Hook optimizer for snip_momentum pruning
@@ -334,6 +342,7 @@ class DeepSpeedEngine(Module):
                 self.sparse_tensor_module_names.add(name + ".weight")
                 logger.info("Will convert {} to sparse tensor during training".format(name))
 
+        # offload 设置相关
         self._optimized_linear_offload_setup()
 
         self.save_non_zero_checkpoint = False
@@ -1216,14 +1225,18 @@ class DeepSpeedEngine(Module):
             assert occurrence <= 1, f"Parameter with name: {name} occurs multiple times in optimizer.param_groups. Make sure it only appears once to prevent undefined behavior."
 
     def _do_optimizer_sanity_check(self, basic_optimizer):
+        # 获取model 和grad_accum的dtype
         model_dtype, grad_accum_dtype = self.get_data_types()
+        # 是否开启了zero
         zero_enabled = self.zero_optimization()
+        # 是否开启了混合训练
         amp_enabled = self.amp_enabled()
         # config based assertions
         assert (
             not (amp_enabled and zero_enabled)
         ), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
         if zero_enabled:
+            # 如果是zero不支持的optimizer
             if not is_zero_supported_optimizer(basic_optimizer):
                 assert (
                     self.zero_allow_untested_optimizer()
@@ -1251,6 +1264,7 @@ class DeepSpeedEngine(Module):
         elif model_dtype == grad_accum_dtype:
             if model_dtype == torch.bfloat16:
                 if self.pipeline_parallelism:
+                    # NOTE: xyt
                     logger.warning(
                         "**** BF16 gradient accumulation is not safe numerically with large number of accumulation steps, proceed with caution *****"
                     )
@@ -1271,9 +1285,10 @@ class DeepSpeedEngine(Module):
 
     # Configure optimizer
     def _configure_optimizer(self, client_optimizer, model_parameters):
-        if client_optimizer is None:
+        if client_optimizer is None: # 如果没有传入已经实例化好的optimizer
             if self.has_moe_layers:
                 model_parameters = configure_moe_param_groups(model_parameters)
+            # 实例化最基础的optimizer
             basic_optimizer = self._configure_basic_optimizer(model_parameters)
             log_dist(f"Using DeepSpeed Optimizer param name {self.optimizer_name()} as basic optimizer", ranks=[0])
         else:
@@ -1289,28 +1304,32 @@ class DeepSpeedEngine(Module):
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
 
+        # 去掉没有参数的空参数组
         basic_optimizer.param_groups[:] = [pg for pg in basic_optimizer.param_groups if len(pg["params"]) != 0]
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
 
+        # 检查不同参数组之间是否包含了相同的参数
         self._check_for_duplicates(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
         log_dist("DeepSpeed Basic Optimizer = {}".format(basic_optimizer.__class__.__name__), ranks=[0])
 
+        # 检查optimizer应该是什么类型
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
+        # 如果是用zero
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
-        elif optimizer_wrapper == AMP:
+        elif optimizer_wrapper == AMP: # 如果用apex的混合精度训练
             amp_params = self.amp_params()
             log_dist(f"Initializing AMP with these params: {amp_params}", ranks=[0])
             model, self.optimizer = amp.initialize(self.module, basic_optimizer, **amp_params)
             self._set_client_model(model)
             self._broadcast_model()
             # TODO: maybe need to broadcast experts differently?
-        elif optimizer_wrapper == FP16:
+        elif optimizer_wrapper == FP16: # fp16
             self.optimizer = self._configure_fp16_optimizer(basic_optimizer)
-        elif optimizer_wrapper == BFLOAT16:
+        elif optimizer_wrapper == BFLOAT16: # bf16
             self.optimizer = self._configure_bf16_optimizer(basic_optimizer)
         else:
             self.optimizer = basic_optimizer
@@ -1322,6 +1341,7 @@ class DeepSpeedEngine(Module):
 
     def _configure_basic_optimizer(self, model_parameters):
         optimizer_parameters = self.optimizer_params()
+        breakpoint()
         if optimizer_parameters is None:
             optimizer_parameters = {}
         # print(optimizer_parameters.keys())
@@ -1331,6 +1351,7 @@ class DeepSpeedEngine(Module):
             )
 
         if self.optimizer_name() in [ADAM_OPTIMIZER, ADAMW_OPTIMIZER]:
+            # 表示是否使用torch的adam实现
             torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
             adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE, ADAM_W_MODE_DEFAULT)
 
@@ -1343,7 +1364,7 @@ class DeepSpeedEngine(Module):
                 else:
                     optimizer = torch.optim.AdamW(model_parameters, **optimizer_parameters)
             else:
-                if self.zero_use_cpu_optimizer():
+                if self.zero_use_cpu_optimizer(): # 表示是否使用zero的offload optimizer
                     from deepspeed.ops.adam import DeepSpeedCPUAdam
                     optimizer = DeepSpeedCPUAdam(model_parameters,
                                                  **optimizer_parameters,
@@ -1531,8 +1552,10 @@ class DeepSpeedEngine(Module):
         return optimizer
 
     def _configure_zero_optimizer(self, optimizer):
+        # 获取zero stage
         zero_stage = self.zero_optimization_stage()
 
+        # 获取mics的shard
         mics_shard_size = self.mics_shard_size()
         model_dtype, gradient_accumulation_dtype = self.get_data_types()
 
@@ -1546,6 +1569,7 @@ class DeepSpeedEngine(Module):
                 "The deprecated version of ZeRO Stage 1 is not supported in deepspeed >= 0.5.9. Please downgrade to a version less than 0.5.9 if you need to use this deprecated version of ZeRO."
             )
 
+        # 如果是stage1或者stage2
         if zero_stage <= ZeroStageEnum.gradients:
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
@@ -1589,7 +1613,7 @@ class DeepSpeedEngine(Module):
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint())
 
-        elif zero_stage == ZeroStageEnum.weights:
+        elif zero_stage == ZeroStageEnum.weights: # 如果是zero3
             assert not self.has_moe_layers, "MoE not supported with Stage 3"
             if isinstance(optimizer, DummyOptim):
                 log_dist("Creating ZeRO Offload", ranks=[0])
