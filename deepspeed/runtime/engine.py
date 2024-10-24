@@ -237,6 +237,7 @@ class DeepSpeedEngine(Module):
         self.mesh_device = mesh_device
 
         # for debug purposes - can then debug print: debug_get_module_name(module)
+        # 打印model的模块名和参数名
         debug_extract_module_and_param_names(model)
 
         if self.mesh_device:

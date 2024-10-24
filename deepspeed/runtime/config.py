@@ -732,6 +732,7 @@ class DeepSpeedConfig(object):
             self.world_size = 1
         logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")
         # If elastic-mode enabled, update compute + update _param_dict
+        # elastic-mode: 理解为可动态更新config等
         self.elasticity_enabled = elasticity_enabled(self._param_dict)
         if self.elasticity_enabled:
             logger.info("DeepSpeed elasticity support enabled")
@@ -802,6 +803,7 @@ class DeepSpeedConfig(object):
         self.train_batch_size = get_train_batch_size(param_dict)
         #print(f"beginning get_train_batch_size = {get_train_batch_size}")
         self.train_micro_batch_size_per_gpu = get_train_micro_batch_size_per_gpu(param_dict)
+        # 梯度累计步数
         self.gradient_accumulation_steps = get_gradient_accumulation_steps(param_dict)
         self.steps_per_print = get_steps_per_print(param_dict)
         self.dump_state = get_dump_state(param_dict)

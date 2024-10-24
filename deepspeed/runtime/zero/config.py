@@ -147,6 +147,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     No longer supported.
     """
 
+    # 在stage3时才有效
     offload_param: Optional[DeepSpeedZeroOffloadParamConfig] = None
     """
     Enable offloading of model parameters to CPU or NVMe. This frees up GPU
