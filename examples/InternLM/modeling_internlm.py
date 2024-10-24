@@ -54,8 +54,11 @@ class FeedForward(nn.Module):
         bias: bool = True,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
+        multiple_of: int = 256,
     ):
         super().__init__()
+        
+        hidden_features = multiple_of * ((hidden_features + multiple_of - 1) // multiple_of)
 
         self.w1 = nn.Linear(
             in_features, hidden_features, bias, device=device, dtype=dtype
