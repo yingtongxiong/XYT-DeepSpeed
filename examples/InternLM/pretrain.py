@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import deepspeed
 import torch
@@ -19,6 +20,9 @@ def pretrain(args):
     
     # initialize deepspeed
     deepspeed.init_distributed()
+    
+    local_rank = int(os.environ["LOCAL_RANK"])  # 获取本地的rank
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     # initialize model
     print_log(">>building model...")
@@ -30,9 +34,10 @@ def pretrain(args):
         mlp_ratio=args.mlp_ratio,
         dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
         parallel_output=args.parallel_output,
-        device=torch.cuda.current_device(),
+        device=device,
     )
-    print_log(">>after buildin model...")
+    print_log(">>after building model...")
+    # print(f"xyt debug after building model device = {device}", flush=True)
 
     print_log(">>initialize deepspeed...")
     model, _, _, _ = deepspeed.initialize(
@@ -41,6 +46,7 @@ def pretrain(args):
                         model_parameters=model.parameters(),
                         dist_init_required=True)
     print_log(">>after initialize deepspeed...")
+    # print(f"xyt debug model device = {model.device}", flush=True)
 
     # initialize dataloader
     print_log(">>initialize dataloader...")
@@ -58,7 +64,7 @@ def pretrain(args):
     
     for idx, batch in enumerate(data_loader):
         
-        input_ids, labels, kwargs = get_batch_data(batch, torch.cuda.current_device())
+        input_ids, labels, kwargs = get_batch_data(batch, model.device)
         
         # forward
         logits = model(input_ids=input_ids, **kwargs)
@@ -87,7 +93,7 @@ def parse_args():
     group_model.add_argument('--hidden-size', type=int, default=4096)
     group_model.add_argument('--num-attention-heads', type=int, default=32)
     group_model.add_argument('--vocab-size', type=int, default=50304)
-    group_model.add_argument('--mlp-ratio', type=float, default=2.5)
+    group_model.add_argument('--mlp-ratio', type=str, default=None)
     group_model.add_argument('--parallel-output', type=bool, default=False)
     group_model.add_argument('--dtype', type=str, default='torch.bfloat16')
     
@@ -104,6 +110,9 @@ def parse_args():
     parser = deepspeed.add_config_arguments(parser)
     
     args = parser.parse_args()
+    
+    args.mlp_ratio = eval(args.mlp_ratio)
+    
     return args
 
 if __name__ == "__main__":
