@@ -30,7 +30,7 @@ class LoggerFactory:
             #     warn = True
             #     logger.warning("To avoid graph breaks caused by logger in compile-mode, it is recommended to"
             #                    " disable logging by setting env var DISABLE_LOGS_WHILE_COMPILING=1")
-            # return True
+            return True
 
         return warn_once
 

@@ -138,6 +138,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  fp16_master_weights_and_gradients=False,
                  elastic_checkpoint=False):
 
+        # CPU offload相关
         if offload_optimizer_config is not None and offload_optimizer_config.device != OffloadDeviceEnum.none:
             self.cpu_offload = True
             self.cpu_offload_pin_memory = offload_optimizer_config.pin_memory
@@ -320,6 +321,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # move all the parameters to cpu to free up GPU space for creating flat buffer
 
             # Create temp CPU param copies, free accelerator tensors
+            # 把GPU上的参数copy到CPU上，并保存到cpu_data属性中
+            # 将GPU上的参数释放
             orig_group_numel = 0
             for param in self.bit16_groups[i]:
                 orig_group_numel += param.numel()
@@ -350,6 +353,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.round_robin_bit16_meta.append(meta_tensors)
 
             # create flat buffer in CPU
+            # 将cpu_data对齐alignment，并做flatten操作
             flattened_buffer = self.flatten_dense_tensors_aligned(
                 self.round_robin_bit16_groups[i],
                 self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i]),

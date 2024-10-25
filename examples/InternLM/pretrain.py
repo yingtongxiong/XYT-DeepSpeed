@@ -8,8 +8,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from modeling_internlm import InternLM1
-from examples.data.build_dataloader import get_train_dataloader
-from examples.data.process_data import get_batch_data
+
+from data.build_dataloader import get_train_dataloader
+from data.process_data import get_batch_data
+
 
 def print_log(msg):
     global_rank = dist.get_rank()

@@ -198,7 +198,7 @@ class NoopTimer:
 
 class ThroughputTimer:
 
-    def __init__(self, config, batch_size, start_step=2, steps_per_output=None, monitor_memory=False, logging_fn=None):
+    def __init__(self, config, batch_size, start_step=1, steps_per_output=None, monitor_memory=False, logging_fn=None):
         from deepspeed.utils import logger
         self.config = config
         self.start_time = 0

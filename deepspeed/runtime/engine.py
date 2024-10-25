@@ -1341,7 +1341,6 @@ class DeepSpeedEngine(Module):
 
     def _configure_basic_optimizer(self, model_parameters):
         optimizer_parameters = self.optimizer_params()
-        breakpoint()
         if optimizer_parameters is None:
             optimizer_parameters = {}
         # print(optimizer_parameters.keys())

@@ -133,11 +133,13 @@ def initialize(args=None,
                                                                              __git_branch__),
              ranks=[0])
 
+    # 如果是通过deepspeed.initialize去初始化的，则应将zero相关的context环境给关闭
     # Disable zero.Init context if it's currently enabled
     zero.partition_parameters.shutdown_init_context()
 
     assert model is not None, "deepspeed.initialize requires a model"
 
+    # 初始化分布式环境
     global dist
     from deepspeed import comm as dist
     dist_backend = get_accelerator().communication_backend_name()
@@ -150,6 +152,7 @@ def initialize(args=None,
     if config is None and config_params is not None:
         config = config_params
 
+    # 通过传入的device mesh参数来初始化分布式环境
     mesh_device = None
     if mesh_param:
         logger.info(f"mesh_param to Initialize mesh device: {mesh_param}")
@@ -161,6 +164,7 @@ def initialize(args=None,
             mesh_device = dist.initialize_mesh_device((config["data_parallel_size"], config["sequence_parallel_size"]), \
             ("data_parallel", "sequence_parallel"))
 
+    # deepscale config处理
     # Check for deepscale_config for backwards compat
     if hasattr(args, "deepscale_config") and args.deepscale_config is not None:
         logger.warning("************ --deepscale_config is deprecated, please use --deepspeed_config ************")
@@ -170,11 +174,14 @@ def initialize(args=None,
         args.deepspeed_config = args.deepscale_config
         args.deepscale_config = None
 
+    # deepspeed config处理
     # Check that we have only one config passed
     if hasattr(args, "deepspeed_config") and args.deepspeed_config is not None:
         assert config is None, "Not sure how to proceed, we were given deepspeed configs in the deepspeed arguments and deepspeed.initialize() function call"
         config = args.deepspeed_config
     assert config is not None, "DeepSpeed requires --deepspeed_config to specify configuration file"
+    
+    # 根据是否开了pp，决定初始化哪种engine
     if not isinstance(model, PipelineModule):
         config_class = DeepSpeedConfig(config, mpu, mesh_device=mesh_device)
         if config_class.hybrid_engine.enabled:
@@ -218,6 +225,7 @@ def initialize(args=None,
                                 config=config,
                                 config_class=config_class)
 
+    # 初始化完成之后，恢复zero的context环境
     # Restore zero.Init context if necessary
     zero.partition_parameters.restore_init_context()
 

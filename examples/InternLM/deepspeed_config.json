@@ -1,5 +1,5 @@
 {
-    "train_batch_size": 32,
+    "train_batch_size": 8,
     "steps_per_print": 1,
     "optimizer": {
         "type": "Adam",
@@ -18,9 +18,7 @@
     "zero_optimization": {
         "stage": 1,
         "overlap_comm": true,
-        "reduce_bucket_size": 5e6,
-        "mics_hierarchical_params_gather": false,
-        "stage3_model_persistence_threshold": 10,
+        "reduce_bucket_size": 536870912,
         "contiguous_gradients": false
     }
 }
