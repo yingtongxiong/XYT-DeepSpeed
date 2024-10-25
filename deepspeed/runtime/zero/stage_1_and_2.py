@@ -303,6 +303,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.groups_padding = []
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
+            # dp rank
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
 
             # push this group to list before modify
@@ -349,11 +350,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Create meta tensors list, ordered according to round_robin_tensors
             meta_tensors = []
             for param in round_robin_tensors:
+                # device=meta，是一个虚拟设备，不会实际分配内存或创建张量数据
+                # 只定义了张量的性质和数据类型
                 meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
             self.round_robin_bit16_meta.append(meta_tensors)
 
             # create flat buffer in CPU
-            # 将cpu_data对齐alignment，并做flatten操作
+            # 将cpu_data对齐alignment(其中可能会涉及到padding操作)，并做flatten操作
+            # 这里的padding操作会使得flatten之后的params可以被dp world size整除
             flattened_buffer = self.flatten_dense_tensors_aligned(
                 self.round_robin_bit16_groups[i],
                 self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i]),
@@ -369,6 +373,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
 
+            # Why: 为什么是最后一个dp rank保存padding
             # Record padding required for alignment
             if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
                 padding = self.bit16_groups_flat[i].numel() - orig_group_numel
@@ -380,10 +385,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 see_memory_usage(f"After Flattening and after emptying param group {i} cache", force=False)
 
             # set model bit16 weight to slices of flattened buffer
+            # 将self.bit16_groups和self.round_bin_bit16_groups指向flatten tensor的内存
             self._update_model_bit16_weights(i)
 
             # divide the flat weights into near equal partition equal to the data parallel degree
             # each process will compute on a different part of the partition
+            # 这里是直接切分flatten之后的参数
+            # 经过update model之后，self.bit16_groups_flat self.bit16_groups self.round_bin_bit16_groups共享存储
+            # 这里的切分原则是：尽可能平均分，例如[4, 4, 3]
             data_parallel_partitions = self.get_data_parallel_partitions(self.bit16_groups_flat[i], i)
             self.parallel_partitioned_bit16_groups.append(data_parallel_partitions)
 
@@ -394,10 +403,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # A partition of the fp32 master weights that will be updated by this process.
             # Note that the params in single_partition_of_fp32_groups is cloned and detached
             # from the origin params of the model.
+            # fp16_master_weights_and_gradients: 表示os内的param是否为fp16类型
             if not fp16_master_weights_and_gradients:
+                # 每个dp rank取自己对应的那部分参数，并将其转成fp32类型
                 weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
                     self.device).clone().float().detach()
             else:
+                # 每个dp rank取自己对应的那部分参数，并将其转成fp16类型
                 weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
                     self.device).clone().half().detach()
 
@@ -409,11 +421,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Set local optimizer to have flat params of its own partition.
             # After this, the local optimizer will only contain its own partition of params.
             # In that case, the local optimizer only saves the states(momentum, variance, etc.) related to its partition's params(zero stage1).
+            # 每个dp rank将各自的partition params覆盖param group的params属性
             self.single_partition_of_fp32_groups[
                 i].requires_grad = True  # keep this in case internal optimizer uses it
             param_group['params'] = [self.single_partition_of_fp32_groups[i]]
 
             partition_size = len(self.bit16_groups_flat[i]) / dist.get_world_size(group=self.real_dp_process_group[i])
+            # 获取一些切分信息，由于参数是flatten之后被切的，因此有些参数，可能被分成多个部分，且多个部分被分配给不同的dp
+            # 因此需要用first_offset来记录当前的partition是在params_in_partition[0]中的local索引
             params_in_partition, params_not_in_partition, first_offset = self.get_partition_info(
                 self.round_robin_bit16_groups[i], partition_size, partition_id)
 
@@ -423,14 +438,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.first_offset.append(first_offset)
 
         self.reduce_bucket_size = int(reduce_bucket_size)
+        # 使用多个rank bucket all-reduce
         self.use_multi_rank_bucket_allreduce = use_multi_rank_bucket_allreduce
         self.allgather_bucket_size = int(allgather_bucket_size)
 
         self.reduction_stream = None if get_accelerator().is_synchronized_device() else get_accelerator().Stream()
         #self.copy_grad_stream = get_accelerator().Stream()
         self.callback_queued = False
-
-        self.param_dict = {}
 
         # map between param_id and bool to specify if a param is in this partition
         self.is_param_in_current_partition = {}
@@ -444,9 +458,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.ipg_bucket_has_moe_params = False
 
         # simplified param id
+        # key: id(param); value: count(所有param group中的索引)
         self.param_id = {}
+        # key: count; value: param
+        self.param_dict = {}
 
         #interesting code: unique ids being assigned to individual parameters
+        # 记录最大的param个数
         largest_param_numel = 0
         count = 0
         for i, params_group in enumerate(self.bit16_groups):
@@ -467,6 +485,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for param in param_group:
                 self.is_param_in_current_partition[self.get_param_id(param)] = False
 
+        # cpu offload部分暂时跳过
         if self.cpu_offload:
             self.accumulated_grads_in_cpu = {}
             self.norm_for_param_grads = {}
@@ -515,13 +534,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.first_param_index_in_partition = {}
 
         # initializes all data structures for implementing gradient partitioning
+        # 初始化line507之后的字典变量，且这些变量都是嵌套字典，dict[param_group_id][partition_id]
         self.initialize_gradient_partitioning_data_structures()
 
         # resets the data structure value for the next backward propagation
+        # 重新设置状态，如grad是否被compute，grad是否被all-reduce，剩下需要reduce的grad
         self.reset_partition_gradient_structures()
 
         # creates backward hooks for gradient partitioning
         self._grad_acc_hooks = []
+        
+        # 创建grad all-reduce hook
         if self.partition_gradients or self.overlap_comm:
             self.create_reduce_and_remove_grad_hooks()
 
@@ -541,6 +564,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert not self.dynamic_loss_scale
 
         see_memory_usage("Before initializing optimizer states", force=True)
+        # 给partition params分配一个空的partition grad，并将partition params的grad设置为None
         self.initialize_optimizer_states()
         see_memory_usage("After initializing optimizer states", force=True)
 
@@ -550,9 +574,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
 
+        # 在混合训练中，将fp16的参数和fp32参数给关联起来，实现能够同步更新
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
 
+        # 加载os的param checkpoint
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
 
@@ -639,11 +665,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         assert self.ep_process_group is not None, "Expert parallel group should be configured with MoE"
 
     def _update_model_bit16_weights(self, group_index):
+        # 此时updated_params与flatten tensor共享内存，即是连续的
         updated_params = self.unflatten(self.bit16_groups_flat[group_index], self.round_robin_bit16_meta[group_index])
+        # 再将原本内存不连续的param的底层数据指针指向updated_param的内存
         for p, q in zip(self.round_robin_bit16_groups[group_index], updated_params):
             p.data = q.data
 
         # set model fp16 weight to slices of reordered flattened buffer
+        # 将调整了内存的round_bin_bit16给传输给bit16_groups
         for param_index, param in enumerate(self.bit16_groups[group_index]):
             new_index = self.round_robin_bit16_indices[group_index][param_index]
             param.data = self.round_robin_bit16_groups[group_index][new_index].data
@@ -1601,11 +1630,37 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_size = base_size
             if id < remaining:
                 partition_size = partition_size + 1
+            # 在维度0，从start开始，索引partition_size行
             partitions.append(tensor.narrow(0, start, partition_size))
             start = start + partition_size
         return partitions
 
     def get_partition_info(self, tensor_list, partition_size, partition_id):
+        '''
+        For example
+        
+        tensor_list = [tensor(4, 5), tensor(5, 6), tensor(2, 5)]
+        dp_world_size = 4
+        partition_size = 15
+        
+        partition_id = 0: params_in_partition=[tensor(4, 5)]
+                          params_not_in_partition = [tensor(5, 6), tensor(2, 5)]
+                          first_offset = 0
+        
+        partition_id = 1: params_in_partition=[tensor(4, 5), tensor(5, 6)]
+                          params_not_in_partition = [tensor(2, 5)]
+                          first_offset = 15(第一个tensor的local索引)
+        
+        partition_id = 2: params_in_partition=[tensor(5, 6), ]
+                          params_not_in_partition = [tensor(4, 5), tensor(2, 5)]
+                          first_offset = 10
+        
+        partition_id = 3: params_in_partition=[tensor(5, 6), tensor(2, 5)]
+                    params_not_in_partition = [tensor(4, 5)]
+                    first_offset = 25
+        
+        '''
+        
         params_in_partition = []
         params_not_in_partition = []
 
@@ -1619,12 +1674,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             tensor_size = tensor.numel()
 
+            # 如果一个tensor的开头就在区间内
             if start_index <= current_index < end_index:
                 params_in_partition.append(tensor)
 
+            # 如果start_index，在该tensor的区间内
             elif current_index < start_index < (current_index + tensor_size):
                 params_in_partition.append(tensor)
 
+                # 如果这个tensor的后半部分属于该dp rank，则需要记录这后半部分在该tensor中的索引
                 assert (first_offset == 0
                         ), "This can happen either zero or only once as this must be the first tensor in the partition"
                 first_offset = start_index - current_index

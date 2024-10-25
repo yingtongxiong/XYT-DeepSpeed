@@ -311,19 +311,58 @@ def safe_set_local_fp32_param(param, value):
 
 def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,
                             param_group_index, partition_start, partition_size):
+    '''
+    lp      lp0 lp1 lp2         lp3  lp4            <-------  indices/names
+    lp      [  ][  ][          ][   ][         ]    <-------- tensors
+    flat_lp [                                  ]     <-------- flat lp params
+    flat_hp            [                 ]   <------------------ flat hp partition on current rank
+    full_hp [                                        ] <------- full flat hp params
+    
+    对于lp2而言：
+
+    lp              {         }
+    flat_lp [                                ]
+    flat_hp            (                 )
+
+
+    flat_lp [       {  (      }          )   ]
+                    lx  hx   ly          hy
+                        ly-hx
+    
+    lx = 10, hx=20, ly=30, hy=50
+    
+    fragment: 即为lp_param被partition选中的那一部分，对应图中的ly-hx，即30-20=10
+    fragment_start = 20
+    fragment_end = 30
+    fragment_numel = 10
+    
+    下面的start索引即为fragment在lp或者hp中的local起始索引
+    lp_frag_address:
+        start = fragment_start - lx = 20 - 10 = 10
+        numel = fragment_numel = 10
+
+    hp_frag_address:
+        start = fragment_start - hx = 20 - 20 = 0
+        numel = fragment_numel = 10    
+    
+    '''
+    
     lp_end = lp_param.numel() + lp_start
     hp_start = partition_start
     hp_end = partition_start + partition_size
 
+    # 这里其实就是取在flatten中，lp_param与hp_param相交的地方
     fragment_start = max(lp_start, hp_start)
     fragment_end = min(lp_end, hp_end)
     assert fragment_start < fragment_end, \
         f'fragment start {fragment_start} should be < fragment_end {fragment_end}'
 
     fragment_numel = fragment_end - fragment_start
+    # hp_frad_address：start表示fragment在hp partition中的local的起始索引，numel为fragment的长度
     hp_frag_address = fragment_address(start=fragment_start - hp_start, numel=fragment_numel)
     hp_fragment_tensor = flat_hp_partition.narrow(0, hp_frag_address.start, hp_frag_address.numel)
 
+    # lp_frag_address: start表示fragment在lp中的local起始索引，numel为fragement的长度
     lp_frag_address = fragment_address(start=fragment_start - lp_start, numel=fragment_numel)
     lp_fragment_tensor = lp_param.flatten().narrow(0, lp_frag_address.start, lp_frag_address.numel)
 
