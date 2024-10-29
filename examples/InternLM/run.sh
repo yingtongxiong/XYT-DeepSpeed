@@ -30,7 +30,7 @@ NNODES=$SLURM_NNODES
 micro_batch_size=1
 gradient_accumulate_size=1
 
-seq_len=4096
+seq_len=8192
 
 
 # 模型相关的config
@@ -42,12 +42,13 @@ MODEL_ARGS=" \
     --mlp-ratio 8/3 \
     --dtype torch.bfloat16 \
     --parallel-output False \
+    --profiling True \
 "
 
 # 数据相关的config
 DATA_ARGS=" \
     --seq-len ${seq_len} \
-    --packed-length 4096 \
+    --packed-length ${seq_len} \
     --micro-bsz ${micro_batch_size} \
     --micro-num ${gradient_accumulate_size} \
     --rampup-batch-size 1 \

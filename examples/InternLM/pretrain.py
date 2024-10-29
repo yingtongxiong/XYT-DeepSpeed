@@ -11,6 +11,8 @@ from modeling_internlm import InternLM1
 
 from data.build_dataloader import get_train_dataloader
 from data.process_data import get_batch_data
+from utils import get_torch_profiler
+
 
 
 def print_log(msg):
@@ -64,25 +66,31 @@ def pretrain(args):
     )
     print_log(">>after initialize loss...")
     
-    for idx, batch in enumerate(data_loader):
-        
-        input_ids, labels, kwargs = get_batch_data(batch, model.device)
-        
-        # forward
-        logits = model(input_ids=input_ids, **kwargs)
-        
-        # compute loss
-        shift_logits = logits.contiguous().view(-1, logits.size(-1))
-        shift_labels = labels.contiguous().view(-1)
-        loss = loss_fn(shift_logits, shift_labels)
+    llm_profile = get_torch_profiler(args.profiling)
 
-        # backward
-        model.backward(loss)
+    with llm_profile as prof:
+        for idx, batch in enumerate(data_loader):
+            
+            input_ids, labels, kwargs = get_batch_data(batch, model.device)
+            
+            # forward
+            logits = model(input_ids=input_ids, **kwargs)
+            
+            # compute loss
+            shift_logits = logits.contiguous().view(-1, logits.size(-1))
+            shift_labels = labels.contiguous().view(-1)
+            loss = loss_fn(shift_logits, shift_labels)
 
-        # update
-        model.step()
-        
-        print_log(f"step = {idx}, {loss=}")
+            # backward
+            model.backward(loss)
+
+            # update
+            model.step()
+            
+            print_log(f"step = {idx}, {loss=}")
+            
+            if idx % 3 == 0:
+                prof.step()
         
 
 
@@ -98,6 +106,7 @@ def parse_args():
     group_model.add_argument('--mlp-ratio', type=str, default=None)
     group_model.add_argument('--parallel-output', type=bool, default=False)
     group_model.add_argument('--dtype', type=str, default='torch.bfloat16')
+    group_model.add_argument('--profiling', type=bool, default=False)
     
     group_data = parser.add_argument_group(title='data')
     group_data.add_argument('--seq-len', type=int, default=4096)
