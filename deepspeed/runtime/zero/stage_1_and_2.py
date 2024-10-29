@@ -808,8 +808,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.cpu_offload is False:
             for i, _ in enumerate(self.bit16_groups):
-
                 if not i in self.averaged_gradients or self.averaged_gradients[i] is None:
+                    # 第一个mirco_strep会走到这里
                     self.averaged_gradients[i] = self.get_flat_partition(
                         self.params_in_partition[i],
                         self.first_offset[i],
@@ -818,6 +818,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         device=get_accelerator().current_device_name(),
                         return_tensor_list=True)
                 else:
+                    # 由于zero2在每个micro_step都进行grad的all-reduce，因此从第2个micro_step开始
+                    # self.averaged_gradients都会存在，从而走到else分支
                     avg_new = self.get_flat_partition(self.params_in_partition[i],
                                                       self.first_offset[i],
                                                       self.partition_size[i],
@@ -825,7 +827,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                       device=get_accelerator().current_device_name(),
                                                       return_tensor_list=True)
 
-                    # 在非overlap情况下，这里手动进行梯度累加？？？
+                    # 在zero2、zero3的情况下，手动进行梯度累加
                     for accumulated_grad, new_avg_grad in zip(self.averaged_gradients[i], avg_new):
                         accumulated_grad.add_(new_avg_grad)
 
@@ -1440,7 +1442,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.params_already_reduced[param_id] = True
                 if self.partition_gradients:
+                    # 如果param不在当前partition中
                     if not self.is_param_in_current_partition[param_id]:
+                        # 如果开了overlap，并且没有使用contiguous gradients
+                        # 则保存记录不属于自己的param
                         if self.overlap_comm and self.contiguous_gradients is False:
                             # Clear grads of other partitions during the next reduction
                             # to avoid clearing them before the reduction is complete.
@@ -1462,8 +1467,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #####################################################################
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
-
-        # 只有到梯度累计步数才会执行hook
+        # zero1：只有到梯度累计步数才会执行hook
+        # zero2：即使是非梯度累积步，也需要做grad通信，原因是，bf16 params没有被切分，因此每个rank上在做完
+        # backward之后会有完整的grad，而zero2，3只需要切分后的grad，因此需要做reduce-scatter
         if self.partition_gradients or self.is_gradient_accumulation_boundary:
             self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
@@ -1583,6 +1589,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
+            # allreduced为flatten的
+            # small_bucket是没有flatten的
             allreduced = self.allreduce_bucket(
                 small_bucket,
                 rank=rank,
