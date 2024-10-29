@@ -374,6 +374,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
 
             # Why: 为什么是最后一个dp rank保存padding
+            # 因为只有最后一个dp会padding
             # Record padding required for alignment
             if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
                 padding = self.bit16_groups_flat[i].numel() - orig_group_numel
@@ -391,7 +392,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # divide the flat weights into near equal partition equal to the data parallel degree
             # each process will compute on a different part of the partition
             # 这里是直接切分flatten之后的参数
-            # 经过update model之后，self.bit16_groups_flat self.bit16_groups self.round_bin_bit16_groups共享存储
+            # 经过update model之后，self.bit16_groups_flat self.bit16_groups self.round_bin_bit16_groups, self.parallel_partitioned_bit16_groups共享存储
             # 这里的切分原则是：尽可能平均分，例如[4, 4, 3]
             data_parallel_partitions = self.get_data_parallel_partitions(self.bit16_groups_flat[i], i)
             self.parallel_partitioned_bit16_groups.append(data_parallel_partitions)
@@ -795,6 +796,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # if dist.get_rank() == 0:
         #    logger.info("Params already reduced %s", self.params_already_reduced)
+        # 到此时为止，所有grad都进行了all-reduce操作，因此重置记录状态的数据结构
         for i in range(len(self.params_already_reduced)):
             self.params_already_reduced[i] = False
 
@@ -823,6 +825,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                       device=get_accelerator().current_device_name(),
                                                       return_tensor_list=True)
 
+                    # 在非overlap情况下，这里手动进行梯度累加？？？
                     for accumulated_grad, new_avg_grad in zip(self.averaged_gradients[i], avg_new):
                         accumulated_grad.add_(new_avg_grad)
 
@@ -913,6 +916,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     param.grad = None
 
     def get_gradient_for_reduction(self, param):
+        # 表示是否使用grad_accum属性
         if self.use_grad_accum_attribute:
             return param.grad_accum.to(self.dtype) if param.grad_accum is not None else None
         else:
@@ -941,6 +945,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         def reduce_partition_and_remove_grads(*notneeded):
                             self.reduce_ready_partitions_and_remove_grads(param, i)
 
+                        # 注意在梯度累积上注册hook，该hook会在每次反向传播计算完成后，且累积的梯度被累积之前触发
+                        # 为什么不直接在param上直接注册hook，防止hook修改param.grad，从而影响梯度累积过程
                         self._grad_acc_hooks.append(grad_acc.register_hook(reduce_partition_and_remove_grads))
                         self.grad_accs.append(grad_acc)
 
@@ -965,7 +971,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############### Independent Partition Gradient ########################
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
 
+        # 获取param的grad
         grad_reduc = self.get_gradient_for_reduction(param)
+        # 如果当前param放入bucket中，bucket满了，则进行all-reduce操作（不包括该param）
         if self.elements_in_ipg_bucket + param.numel() > self.reduce_bucket_size:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
@@ -974,6 +982,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.ipg_index = 1 - self.ipg_index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
+        # 确保param的grad没有被重复all-reduce,才能被放到bucket中
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {param_id} has already been reduced. \
@@ -989,6 +998,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 new_grad_tensor.copy_(grad_reduc.view(-1))
                 grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc)
 
+        # 如果bucket还没满，则把param加入到bucket中
         self.elements_in_ipg_bucket += param.numel()
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
@@ -1452,6 +1462,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #####################################################################
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
+
+        # 只有到梯度累计步数才会执行hook
         if self.partition_gradients or self.is_gradient_accumulation_boundary:
             self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
@@ -1530,6 +1542,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             communication_data_type = self.communication_data_type
 
         if communication_data_type != tensor.dtype:
+            # 这里会产生一个新张量
             tensor_to_allreduce = tensor.to(communication_data_type)
 
         if divide:
@@ -1542,6 +1555,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             global_rank = dist.get_global_rank(process_group, rank)
             dist.reduce(tensor_to_allreduce, global_rank, group=process_group)
 
+        # 如果上面没有进行数据类型转换，则 tensor和tensor_to_allreduce应该指向同一个对象
+        # 否则，需要将tensor_to_allreduce的结果copy给tensor
         if communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
             if rank is None or rank == dist.get_rank(group=process_group):
                 tensor.copy_(tensor_to_allreduce)
@@ -1558,6 +1573,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def allreduce_and_copy(self, small_bucket, rank=None, log=None, divide=True, process_group=None):
         process_group = self.dp_process_group if process_group is None else process_group
         if self.overlap_comm:
+            # 如果有数据依赖，则需要强行同步
             if not get_accelerator().resolves_data_dependency():
                 get_accelerator().synchronize()
             # It is safe to clear the previously reduced grads of other partitions
@@ -1575,6 +1591,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 process_group=process_group,
             )
             if rank is None or rank == dist.get_rank(group=self.dp_process_group):
+                # 由于进行了flatten操作，需要将small_bucket和allreduced同步一下，即让两者指向同一块内存
                 for buf, synced in zip(small_bucket, self.unflatten(allreduced, small_bucket)):
                     buf.copy_(synced)
 
@@ -1603,6 +1620,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     # allows using reduction of gradients instead of using all_reduce
 
     def buffered_reduce_fallback(self, rank, grads, elements_per_buffer=500000000, log=None):
+        # 将grad按照dtype划分成多个grad list
         split_buckets = split_half_float_double(grads)
 
         for i, bucket in enumerate(split_buckets):
@@ -1767,11 +1785,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             total_norm = total_norm.pow(1. / norm_type)
 
+        # 检查是否有inf
         norm_is_inf = total_norm.isinf()
+        # 检查是否有nan
         norm_is_nan = total_norm.isnan()
+        # 为inf或nan的为True
         inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
 
         err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
+        # 将为inf或nan的替换为-1
         total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
         return total_norm
 
@@ -1780,9 +1802,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     # list then the flat tensor will be padded with zeros
     def get_flat_partition(self, tensor_list, first_offset, partition_size, dtype, device, return_tensor_list=False):
         flat_tensor_list = []
+        # 累积的element个数（属于当前partition）
         current_size = 0
 
+        # 遍历每个被分给当前partition的param（一个param可能被同时分给多个partition）
         for i, tensor in enumerate(tensor_list):
+            # 获取param的grad
             grad_accum = self.get_param_gradient_attribute(tensor)
             if grad_accum is None:
                 grad_accum = torch.zeros_like(tensor, dtype=dtype)
@@ -1792,24 +1817,32 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             tensor_offset = 0
 
             # we need to offset to get to the right element
+            # 因为first_offset保存的flatten后的param在第一个tensor的local索引
             if i == 0 and first_offset > 0:
                 tensor_offset = first_offset
+                # 在第一个param中，被当前partition选中的element的个数
                 num_elements = num_elements - tensor_offset
 
+            # 这里针对当前partition取tensor前半部分的例子，
+            # 当最后一个tensor只有部分element在当前partition
             # we dont need all elements of the tensor
             if num_elements > (partition_size - current_size):
                 num_elements = partition_size - current_size
 
             # we need a narrow view of the tensor based on the tensor offset and number of elements that
             # we need from this tensor
+            # 这里分几种情况：
+            # 1. 当前partition对于tensor_list[0]，只取其后部分elements
+            # 2. 当前partition对于tensor_list[-1]，只取其前部分elements
             if tensor_offset > 0 or num_elements < tensor.numel():
                 flat_tensor_list.append(tensor.contiguous().view(-1).narrow(0, int(tensor_offset), int(num_elements)))
-            else:
+            else: # 3. 当前partition对于tensor_list中的tensor，取其所有element
                 flat_tensor_list.append(tensor)
 
             current_size = current_size + num_elements
 
         # this means its the last partition and does not align with the dp boundary. We need to pad before flattening
+        # 当参数切分不够dp平均分时，进行padding操作，对grad同理
         if current_size < partition_size:
             flat_tensor_list.append(torch.zeros(int(partition_size - current_size), dtype=dtype, device=device))
 
@@ -1859,6 +1892,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._average_expert_grad_norms(norm_groups)
 
         # calculating L2 norm
+        # 再对所有group做一个总的norm
         return torch.norm(torch.stack(norm_groups), p=norm_type)
 
     def get_bit16_param_group(self, group_no):
@@ -1867,6 +1901,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return [bit16_partitions[dist.get_rank(group=self.real_dp_process_group[group_no])]]
 
     def _optimizer_step(self, group_no):
+        # 这里是一个一个group的更新参数，这里更新的是fp32的param
         original_param_groups = self.optimizer.param_groups
         self.optimizer.param_groups = [original_param_groups[group_no]]
         # Disabling this as the C++ side copy & synchronize is not working correctly
@@ -1879,12 +1914,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.optimizer.param_groups = original_param_groups
 
         # We need to link optimizer state after the first step() call
+        # 获取当前属于当前partition的os state
         self._lazy_init_hp_params_optimizer_state()
 
     def step(self, closure=None):
         """
         Not supporting closure.
         """
+
         self.micro_step_id = INITIAL_MICRO_STEP_ID
 
         see_memory_usage(f"In step before checking overflow")
@@ -1911,8 +1948,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return
 
         # Step 1:- Calculate gradient norm using bit-16 grads
+        # 计算grad norm
         see_memory_usage('Before norm calculation')
         scaled_global_grad_norm = self.scaled_global_norm()
+        # 包含所有group的grad的norm
         self._global_grad_norm = scaled_global_grad_norm / prev_scale
         see_memory_usage('After norm before optimizer')
 
@@ -1942,10 +1981,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
             else:
                 # free gradients for all the parameters that are not updated by this process(ZeRO stage2)
+                # 将不属于自己部分的param的grad释放
                 self.free_grad_in_param_list(self.params_not_in_partition[i])
 
                 # create a flat gradients for parameters updated by this process
                 # If we are last partition, ensure we have same size grads and partition size, if not pad with zero tensors
+                # 如果是最后一个rank，确保grad size和partition param size保持一样
                 if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
                     single_grad_partition = self.flatten_dense_tensors_aligned(
                         self.averaged_gradients[i],
@@ -1959,6 +2000,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.single_partition_of_fp32_groups[i].grad = single_grad_partition
                 # release all the gradient since we have already created a necessary copy in dp_grad_partition(ZeRO stage2)
+                # 释放原始param的grad
                 self.free_grad_in_param_list(self.params_in_partition[i])
 
                 self.averaged_gradients[i] = None

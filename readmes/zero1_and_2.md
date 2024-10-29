@@ -1,6 +1,6 @@
 optimizer data sturctures:
 
-``self.bit16_groups``: 长度为param group的个数，其中每个元素为某个param group中                 requires_grad为True的参数list
+``self.bit16_groups``: 长度为param group的个数，其中每个元素为某个param group中requires_grad为True的参数list
 
 [[param0, param1,...], [param2, param3, ...], ...]
 
@@ -16,11 +16,11 @@ optimizer data sturctures:
 
 其中 meta_param为并未实际创建的张量，其形状和数据类型与param相同，可以理解为只存储了param的形状和数据类型
 
-``self.bit16_groups_flat``: 保存self.round_robin_bit16_groups flatten之后的参数
-[flatten_params0, flatten_params1, ...]
+``self.bit16_groups_flat``: 保存self.round_robin_bit16_groups flatten之后的参数，即一个group所有参数被flatten成一个大tensor
+[flatten_params]
 
-``self.parallel_partitioned_bit16_groups``: 保存每个group的分组情况
-[[dp0_param_group0, dp1_param_group0, ...], [dp_0_param_group1, dp_1_param_group1, ...], ... ]
+``self.parallel_partitioned_bit16_groups``: 保存每个group的分组情况，其中param为flatten之后的
+[[dp0_param_group0, dp1_param_group0, ...]]
 
 ``self.single_partition_of_fp32_groups``: 保存每个dp rank在每个param group被分配到的params
 
@@ -32,11 +32,12 @@ self.single_partition_of_fp32_groups[i].grad = single_grad_partition
 
 ``self.param_dict``: key: count; value: param
 
-``self.params_in_partition``：长度为param group个数
+``self.params_in_partition``：长度为param group个数，每个group被分给当前partition的参数
 
 [[param0, param1,...], [param1, param2, ...], ...]
 
-``self.params_not_in_partition``：长度为param group个数
+``self.params_not_in_partition``：长度为param group个数，每个group没有被分给当前partition的参数
+
 [[param0, param1,...], [param1, param2, ...], ...]
 
 ``self.first_offset``: 长度为param group个数
@@ -72,3 +73,8 @@ self.is_grad_computed[param_group_id][partition_id][param_id] = bool
 
 [{"param_name": hp_fragment_address}, {}, ...]
 
+
+``self.grads_in_ipg_bucket``：保存尚未被all-reduce的param.grad
+[param1.grad, param2.grad, ...]
+
+``self.averaged_gradients``：保存属于当前partition已经做好all-reduce的grad（tensor list，一头一尾可能为展开的tensor），长度为参数组的个数，其中每个元素为一个tensor list

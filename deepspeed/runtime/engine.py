@@ -604,6 +604,8 @@ class DeepSpeedEngine(Module):
         return self._config.data_efficiency_config[DATA_SAMPLING][CURRICULUM_LEARNING]
 
     def random_ltd_enabled(self):
+        # layer-wise token dropping
+        # 在每一层模型中逐渐减少传递到下一层的输入数量，来降低计算量
         return self._config.data_efficiency_config[DATA_ROUTING][RANDOM_LTD][RANDOM_LTD_ENABLED]
 
     def random_ltd_config(self):
@@ -1875,6 +1877,7 @@ class DeepSpeedEngine(Module):
                                  and self.global_steps == self.flops_profiler_profile_step() and self.global_rank == 0)
 
         # used to check quantization happens at step 0!
+        # 判断是否有量化
         if self.global_steps == 0 and hasattr(self, "compression_scheduler"):
             self.compression_scheduler.step(step_zero_check=True)
             if self.quantizer:
@@ -1888,13 +1891,16 @@ class DeepSpeedEngine(Module):
                         None,
                     )
 
+        # flops profiling相关
         if flops_profiler_active:
             self.flops_profiler.start_profile(ignore_list=None)
 
         if self.module.training:
+            # 如果有模型压缩
             if self.progressive_layer_drop:
                 kwargs.update(self.progressive_layer_drop.get_state())
 
+        # 如果没有开pipeline
         if self.__class__.__name__ != "PipelineEngine":
             # TODO: The above if condition is a HACK since for PipelineEngine
             # it's difficult to inject argument in forward pass.
@@ -1906,6 +1912,7 @@ class DeepSpeedEngine(Module):
         if self.module.training and self.random_ltd_enabled():
             self.random_ltd_scheduler.update_seq(self.global_steps)
 
+        # 判断是否开了zero3
         if self.zero_optimization_partition_weights():
             # Enable automated discovery of external parameters by indicating that
             # we are in a forward pass.
@@ -2040,6 +2047,7 @@ class DeepSpeedEngine(Module):
         self._start_timers(self.engine_timers.backward_inner_timers)
 
         if self.zero_optimization():
+            # 做backward之前，修改grad累积的状态
             self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
             self.optimizer.backward(loss, retain_graph=retain_graph)
         elif self.amp_enabled():
@@ -2064,7 +2072,9 @@ class DeepSpeedEngine(Module):
         self._stop_timers(self.engine_timers.backward_inner_timers)
 
         self._start_timers(self.engine_timers.backward_reduce_timers)
-
+    
+        # overlap：True 这里用于对剩下的bucket中的grad（bucket未满，最后剩下的grad）进行all-reduce
+        # overlap： False，直接对所有grad做all-reduce
         if allreduce_gradients and self.enable_backward_allreduce:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
@@ -2213,27 +2223,31 @@ class DeepSpeedEngine(Module):
         assert self.optimizer is not None and not isinstance(self.optimizer, DummyOptim), \
             "must provide optimizer during init in order to use step"
 
-        report_progress = False
+        report_progress = False # log的进程
 
         self._step_applied = False  # assume False, will flip to True
 
         # Update the model when we reach gradient accumulation boundaries
+        # 如果到了梯度累积步数的step
         if self.is_gradient_accumulation_boundary():
             self.gas_boundary_ctr += 1
 
+            # autotuning相关
             if (self.eigenvalue_enabled() and (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)
                     and self.quantizer.any_precision_switch()):
                 log_dist(f"computing eigenvalue...", ranks=[0])
                 self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(self.module, self.device,
                                                                            self.optimizer.cur_scale)
 
+            # 模型压缩相关
             if self.progressive_layer_drop:
                 self.progressive_layer_drop.update_state(self.global_steps)
 
+            # autotuning相关
             if (self.eigenvalue_enabled() and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()
                     and self.quantizer.any_precision_switch()):
                 self._take_model_step(lr_kwargs, self.block_eigenvalue)
-            else:
+            else: # training
                 self._take_model_step(lr_kwargs)
 
             report_progress = self.global_rank == 0 if self.global_rank else True
@@ -2243,6 +2257,7 @@ class DeepSpeedEngine(Module):
         self._stop_timers(self.engine_timers.step_timers)
 
         # Log learning rate
+        # 如果开启了监控
         if self.monitor.enabled:
             if self.is_gradient_accumulation_boundary():
                 if self.global_rank == 0:
@@ -2267,6 +2282,7 @@ class DeepSpeedEngine(Module):
                     self.monitor.write_events(self.summary_events)
 
         # Check flops profiling
+        # 如果开启了tflops profiling
         if flops_profiler_active:
             if self.autotuning_enabled():
                 self.flops = self.flops_profiler.get_total_flops() * 3

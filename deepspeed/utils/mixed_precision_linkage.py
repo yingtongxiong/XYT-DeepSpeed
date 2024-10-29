@@ -22,6 +22,7 @@ def link_hp_params(lp_param_list, flat_hp_partition, gradient_dict, offload_grad
 
 def lazy_init_hp_params_optimizer_state(lp_param_list, flat_hp_partition, optimizer_state):
     for lp in lp_param_list:
+        # 只有属于自己partition的param才有_hp_mapping
         if lp._hp_mapping is not None:
             lp._hp_mapping.set_optim_state_fragment(flat_hp_partition, optimizer_state[flat_hp_partition])
 
