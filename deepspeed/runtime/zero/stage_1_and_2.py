@@ -394,6 +394,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # 这里是直接切分flatten之后的参数
             # 经过update model之后，self.bit16_groups_flat self.bit16_groups self.round_bin_bit16_groups, self.parallel_partitioned_bit16_groups共享存储
             # 这里的切分原则是：尽可能平均分，例如[4, 4, 3]
+            # 在上面flatten过程中，会根据dp size对param进行padding，从而能够平均分
             data_parallel_partitions = self.get_data_parallel_partitions(self.bit16_groups_flat[i], i)
             self.parallel_partitioned_bit16_groups.append(data_parallel_partitions)
 
@@ -992,10 +993,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             Multiple gradient reduction is currently not supported"
 
         if self.contiguous_gradients:
+            # 如果有param比reduce bucket size大
             if param.numel() > self.reduce_bucket_size:
                 self.extra_large_param_to_reduce = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
+                # 这里就相当于把grad_reduc flattn之后的数据保存在了ipg_buffer中
+                # 同时将grad_reduc本身指向ipg_buffer的存储位置
+                # 这样做的效果就是：new_grad_tensor是flatten的grad, grad_reduc是未flatten的，但是两者都指向提前分配好的buffer
+                # 即共享存储
                 new_grad_tensor = self.ipg_buffer[self.ipg_index].narrow(0, self.elements_in_ipg_bucket, param.numel())
                 new_grad_tensor.copy_(grad_reduc.view(-1))
                 grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc)
@@ -1054,8 +1060,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                process_group=None,
                                                bucket_ranks=None):
         process_group = self.dp_process_group if process_group is None else process_group
+        # 这里其实就是将small_bucket中的tensor在dp process group内做了一个大范围的all-reduce
         allreduced = self.allreduce_bucket(small_bucket, log=log, divide=divide, process_group=process_group)
+        # 遍历small_bucket，allreduced，bucket_ranks
         for buf, synced, bucket_rank in zip(small_bucket, self.unflatten(allreduced, small_bucket), bucket_ranks):
+            # 如果是当前rank，则更新
             if dist.get_rank(group=process_group) == bucket_rank:
                 buf.copy_(synced)
 
@@ -1064,6 +1073,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         small_bucket_ranks = []
         numel = 0
         allreduce_sizes = []
+
 
         for i, bucket_elem in enumerate(bucket):
             rank, tensor = bucket_elem
@@ -1088,6 +1098,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                         bucket_ranks=small_bucket_ranks)
 
     def average_tensor(self, tensor):
+        # tensor为传进来的grad_buffer
         if self.overlap_comm:
             stream = self.reduction_stream
             if not get_accelerator().resolves_data_dependency():
@@ -1112,30 +1123,40 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             process_group = self.dp_process_group
             # count = 0
+            # 遍历bucket中的param
+            # 这个for循环其实就是为了记录partition拥有的对应的all-reduce param slice的meta信息，如start_index和numel等信息
             for i, param, param_id in self.params_in_ipg_bucket:
-
                 process_group = self.dp_process_group
+                # 获取param的grad
                 grad_reduc = self.get_gradient_for_reduction(param)
                 #Averages gradients at parameter level if ipg has a moe param
                 #Otherwise averaging is done at the entire buffer level at the end of the loop
                 # MoE param have different groups
+                # MoE的情况先不考虑
                 if self.ipg_bucket_has_moe_params:
                     process_group = self.expert_dp_process_group[param.group_name] if is_moe_param(
                         param) else self.dp_process_group
                     grad_reduc.data.div_(dist.get_world_size(group=process_group) / float(self.sequence_parallel_size))
 
+                # 由于param是先被flaaten后被切的
+                # 因此存在一个param被分配给多个partition的情况
                 partition_ids = self.param_to_partition_ids[i][param_id]
                 assert all([p_id < dist.get_world_size(group=process_group) for p_id in partition_ids
                             ]), f"world size {dist.get_world_size(group=process_group)} and p_ids: {partition_ids}"
                 partition_size = self.partition_size[i]
                 # Get all partition ids + their offsets
+                # 保存param所在partition的起始索引
                 partition_ids_w_offsets = []
                 for partition_id in partition_ids:
                     offset = self.grad_start_offset[i][partition_id][param_id]
                     partition_ids_w_offsets.append((partition_id, offset))
+                # 根据起始索引排序
                 partition_ids_w_offsets.sort(key=lambda t: t[1])
 
                 # Calculate rank and offsets for grad slices
+                # 这里其实在计算，每个partition包含all-reduce flatten param的切片信息
+                # rank_and_offsets：（partition_id, start_index, numel）
+                # 注意这个变量在一次all-reduce中是一直存在的
                 for idx in range(len(partition_ids_w_offsets)):
                     partition_id, offset = partition_ids_w_offsets[idx]
 
@@ -1144,6 +1165,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     # count += 1
 
                     # Calculate numel for grad slice depending on partition location
+                    # 获取当前partition拥有param的多少个element
                     if idx == len(partition_ids_w_offsets) - 1:
                         # Last partition_id uses its own offset
                         numel = param.numel() - offset
@@ -1152,6 +1174,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         numel = partition_ids_w_offsets[idx + 1][1] - offset
 
                     # Merge bucket ranges if they belong to the same rank
+                    # 如果存在相邻的grad slices属于同一个partition，则进行merge
                     if partition_id == prev_id and process_group == prev_process_group:
                         prev_pid, prev_size, prev_numel = rank_and_offsets[-1]
                         rank_and_offsets[-1] = (prev_pid, prev_size, prev_numel + numel)
@@ -1165,6 +1188,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
             buckets = {}
+            # 在use_multi_rank_bucket_allreduce为False的情况下：
+            #   buckets中每个bucket_key都对应一个partition_id，其中value保存了该partition对应的grad的tensor list
+            # 在use_multi_rank_bucket_allreduce为True的情况下：
+            #   buckets中每个bucket_key都对应一个dp group，其中value保存了(partition_id, grad_slice)
+            #   这个优化项其实就是想将每个rank上的小reduce给聚合成一个大的reduce
+            # 个人理解，这里的real_dp_process_group是针对这种场景：即不同的param group对应不同的process group
             for i, (dst, bucket_offset, numel) in enumerate(rank_and_offsets):
                 grad_slice = tensor.narrow(0, int(bucket_offset), int(numel))
                 bucket_key = real_dp_process_group[i] if self.use_multi_rank_bucket_allreduce else (
@@ -1176,6 +1205,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 else:
                     buckets[bucket_key].append(grad_slice)
 
+            # 在use_multi_rank_bucket_allreduce为False的情况下：
+            #   遍历每个partition_id，分别针对partition_id做reduce
             for bucket_key in buckets:
                 if self.use_multi_rank_bucket_allreduce:
                     self.allreduce_and_scatter(buckets[bucket_key],
@@ -1184,7 +1215,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                process_group=bucket_key)
                 else:
                     dst, process_group = bucket_key
-                    self.allreduce_no_retain(buckets[bucket_key],
+                    self.allreduce_no_retain(buckets[bucket_key], # grad_slice
                                              numel_per_bucket=self.reduce_bucket_size,
                                              rank=dst,
                                              divide=False,
@@ -1392,13 +1423,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     total_size += param_in_partition.numel()
 
             see_memory_usage(f"before copying {total_size} gradients into partition")
+            # 记录当前partition拥有的param的总element数目，并分配一个空的tensor
             self.grads_in_partition = torch.empty(int(total_size),
                                                   dtype=self.dtype,
                                                   device=get_accelerator().current_device_name())
             see_memory_usage(f"after copying {total_size} gradients into partition")
-
         grad_reduc = self.get_gradient_for_reduction(param)
         # The allreduce buffer will be rewritten. Copy the gradients in partition to a new buffer
+        # 由于grad_reduc是在buffer里面，这个buffer可能会被rewrite，所以得重新放到一个新的buffer里面
         new_grad_tensor = self.grads_in_partition.view(-1).narrow(0, self.grads_in_partition_offset, param.numel())
         new_grad_tensor.copy_(grad_reduc.view(-1))
         grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc)
@@ -1406,6 +1438,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.grads_in_partition_offset += param.numel()
 
     def reduce_ipg_grads(self):
+        # 这里区分是否使用contiguous_gradients的情况
         if self.contiguous_gradients:
             if self.extra_large_param_to_reduce is not None:
                 assert len(self.params_in_ipg_bucket) == 1, "more than 1 param in ipg bucket, this shouldn't happen"
@@ -1416,8 +1449,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.average_tensor(extra_large_grad_reduc.view(-1))
                 self.extra_large_param_to_reduce = None
             else:
+                # 如果这里不存在超大param的情况（即该param超过了reduce bucket size的大小）
                 self.average_tensor(self.ipg_buffer[self.ipg_index].narrow(0, 0, self.elements_in_ipg_bucket))
         else:
+            # 当不使用contiguous_gradients时，则直接对bucket中的grads在dp group内做all-reduce
             self.buffered_reduce_fallback(None,
                                           self.grads_in_ipg_bucket,
                                           elements_per_buffer=self.elements_in_ipg_bucket)
@@ -1457,6 +1492,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     elif self.contiguous_gradients:
                         self.copy_grads_in_partition(param)
                 else:  # zero stage 1 - partition only optimizer state
+                    # 只处理属于当前partition的param
                     if self.contiguous_gradients and self.is_param_in_current_partition[param_id]:
                         self.copy_grads_in_partition(param)
 
@@ -1558,6 +1594,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             #    "All Reducing"
             dist.all_reduce(tensor_to_allreduce, group=process_group)
         else:
+            # 将process_group中的其他rank上的tensor_to_allreduce聚合到global_rank上
             global_rank = dist.get_global_rank(process_group, rank)
             dist.reduce(tensor_to_allreduce, global_rank, group=process_group)
 

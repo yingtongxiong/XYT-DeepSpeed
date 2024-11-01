@@ -32,7 +32,7 @@ self.single_partition_of_fp32_groups[i].grad = single_grad_partition
 
 ``self.param_dict``: key: count; value: param
 
-``self.params_in_partition``：长度为param group个数，每个group被分给当前partition的参数
+``self.params_in_partition``：长度为param group个数，每个group被分给当前partition的参数，没有被flatten
 
 [[param0, param1,...], [param1, param2, ...], ...]
 
@@ -62,6 +62,8 @@ self.total_grads_in_partition[param_group_id][partition_id] = grad_count
 self.grad_start_offset[param_group_id][partition_id][param_id] = first_offset
 如果该param不属于当前partition，则没有param_id这个key
 
+如果该param_id的所有参数都在该partition中，则first_offset为0；否则为起始索引
+
 ``self.is_grad_computed``: 判断当前grad是否被compute
 self.is_grad_computed[param_group_id][partition_id][param_id] = bool
 
@@ -77,4 +79,16 @@ self.is_grad_computed[param_group_id][partition_id][param_id] = bool
 ``self.grads_in_ipg_bucket``：保存尚未被all-reduce的param.grad
 [param1.grad, param2.grad, ...]
 
-``self.averaged_gradients``：保存属于当前partition已经做好all-reduce的grad（tensor list，一头一尾可能为展开的tensor），长度为参数组的个数，其中每个元素为一个tensor list
+``self.averaged_gradients``：保存属于当前partition已经做好all-reduce的grad（tensor list，一头一尾可能为展开的tensor），长度为参数组的个数，其中每个元素为一个tensor list，长度为group的数量
+
+``self.previous_reduced_grads``：保存不属于当前partition的param
+[param0, param1, ...]
+
+``self.extra_large_param_to_reduce``：在contiguous_gradients的情况下，如果存在param的numel比reduce bucket size还要大，则将该param记录在这个变量中
+
+``partition_ids_w_offsets``：保存元素为元组，((partition_id, first_offset),...) 保存的是某个param对应在某个partition的开始索引
+
+``rank_and_offsets``：((partition_id, start_index, numel), ...) 表示每个partition包含的param在flatten后的需要参与all-reduce的param的起始位置和包含的元素个数
+
+``self.grads_in_partition``: 包含self.params_in_partition中的param的grad的flatten之后的tensor，每个partition均有一个
+
