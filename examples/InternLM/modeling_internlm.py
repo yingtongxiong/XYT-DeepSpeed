@@ -116,7 +116,7 @@ class MHA(nn.Module):
 
         if self.rotary_emb_dim > 0:
             self.rotary_emb = RotaryEmbedding(
-                self.rotary_emb_dim,
+                dim=self.rotary_emb_dim,
                 base=rope_base,
                 scale_base=rotary_emb_scale_base,
                 device=device,
@@ -146,18 +146,22 @@ class MHA(nn.Module):
             qkv = self.wqkv(x)
             qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, d=self.head_dim)
 
-            # q = qkv[:, :, 0].squeeze(2)
-            # k = qkv[:, :, 1].squeeze(2)
-            # v = qkv[:, :, 2].squeeze(2)
+            q = qkv[:, :, 0].squeeze(2)
+            k = qkv[:, :, 1].squeeze(2)
+            v = qkv[:, :, 2].squeeze(2)
         else:
             q, k, v = self.wq(x), self.wk(x), self.wv(x)
             q = rearrange(q, "b s (h d) -> b s h d", d=self.head_dim)
             k = rearrange(k, "b s (h d) -> b s h d", d=self.head_dim)
             v = rearrange(v, "b s (h d) -> b s h d", d=self.head_dim)
-
+        
         # rotary embedding
-        qkv = self.rotary_emb(qkv, **kwargs)
-        kwargs.pop("indexes")
+        indexes = kwargs.pop("indexes", 0)
+        max_seqlen = kwargs.get("max_seqlen", None)
+        q = self.rotary_emb(q, offsets=indexes, cache_type="query", interleaved=self.interleaved, max_seqlen=max_seqlen)
+        k = self.rotary_emb(k, offsets=indexes, cache_type="key", interleaved=self.interleaved, max_seqlen=max_seqlen)
+
+        qkv = torch.stack([q, k, v], dim=2)
 
         qkv = qkv.squeeze(0)
         context = self.inner_attn(qkv, **kwargs)

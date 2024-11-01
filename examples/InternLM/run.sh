@@ -10,7 +10,7 @@ export NCCL_SOCKET_IFNAME="bond0"
 export NCCL_IB_HCA="mlx5_2,mlx5_3,mlx5_4,mlx5_5"
 
 # CUDA相关环境变量
-export CUDA_DEVICE_MAX_CONNECTIONS=1
+# export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # 获取slurm相关变量
 # launch preparation
@@ -30,19 +30,43 @@ NNODES=$SLURM_NNODES
 micro_batch_size=1
 gradient_accumulate_size=1
 
-seq_len=8192
+seq_len=4096
+
+# InternLM2-7B
+num_layers=32
+hidden_size=4096
+num_attention_heads=32
+num_kv_attention_heads=8
+vocab_size=92544
+mlp_ratio=3.5
+dtype=torch.bfloat16
+parallel_output=False
+model_type=internlm1
+
+# InternLM2-70B
+# num_layers=80
+# hidden_size=8192
+# num_attention_heads=64
+# num_kv_attention_heads=8
+# vocab_size=92544
+# mlp_ratio=3.5
+# dtype=torch.bfloat16
+# parallel_output=False
+# model_type=internlm2
+
 
 
 # 模型相关的config
 MODEL_ARGS=" \
-    --num-layers 32 \
-    --hidden-size 4096 \
-    --num-attention-heads 32 \
-    --vocab-size 103168 \
-    --mlp-ratio 8/3 \
-    --dtype torch.bfloat16 \
-    --parallel-output False \
-    --profiling True \
+    --num-layers ${num_layers} \
+    --hidden-size ${hidden_size} \
+    --num-attention-heads ${num_attention_heads} \
+    --num_kv_attention_heads ${num_kv_attention_heads}\
+    --vocab-size ${vocab_size} \
+    --mlp-ratio ${mlp_ratio} \
+    --dtype ${dtype} \
+    --parallel-output ${parallel_output} \
+    --model-type ${model_type} \
 "
 
 # 数据相关的config
