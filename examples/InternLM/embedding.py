@@ -1,90 +1,109 @@
-from einops import rearrange
-from typing import Tuple
+from typing import Optional, Union
 
 import torch
 
-import rotary_emb
+from einops import rearrange
+from rotary_emb import apply_rotary as _flash_apply_rotary_func
 
-class ApplyRotaryEmbQKV_(torch.autograd.Function):
+
+class ApplyRotaryEmb(torch.autograd.Function):
     """
-    ApplyRotaryEmbQKV_
+    ApplyRotaryEmb
     """
 
     @staticmethod
-    def forward(ctx, qkv, cos, sin, cos_k=None, sin_k=None, interleaved=False):
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        interleaved: bool = False,
+        in_place: bool = False,
+        use_fused_rope: bool = True,
+    ):
         """
-            qkv: (total, 3, nheads, headdim) / (batch_size, seqlen, 3, nheads, headdim)
+            x: (batch_size, seqlen, nheads, headdim)
             cos, sin: (seqlen, rotary_dim / 2)
-            cos_k, sin_k: (seqlen, rotary_dim / 2), optional
-            interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead of
-                1st half and 2nd half (GPT-NeoX style).
+            interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead
+                of 1st half and 2nd half (GPT-NeoX style).
         rotary_dim must be <= headdim
-        Apply rotary embedding *inplace* to the first rotary_dim of q and k.
+        Apply rotary embedding to the first rotary_dim of x.
         """
-        # len(qkv.shape) == 4 means the format of qkv is (total, 3, nheads, headdim) which is packed,
-        # otherwise the format of qkv is (batch_size, seqlen, 3, nheads, headdim) which is unpacked.
-        # We handle both packed qkv and unpacked qkv scenario in this class.
-        three = qkv.shape[1] if len(qkv.shape) == 4 else qkv.shape[2]
-        assert three == 3
-        seqlen = None if len(qkv.shape) == 4 else qkv.shape[1]
+        *_, seqlen, _, head_dim = x.shape
         rotary_seqlen, rotary_dim = cos.shape
-        if len(qkv.shape) != 4:
-            assert seqlen <= rotary_seqlen
-        headdim = qkv.shape[-1]
         rotary_dim *= 2
-        assert rotary_dim <= headdim
-        cos_k = cos if cos_k is None else cos_k
-        sin_k = sin if sin_k is None else sin_k
-        assert sin.shape == cos_k.shape == sin_k.shape == (rotary_seqlen, rotary_dim // 2)
-        q_ro = qkv[:, 0, :, :rotary_dim] if len(qkv.shape) == 4 else qkv[:, :, 0, :, :rotary_dim]
-        q1, q2 = q_ro.chunk(2, dim=-1) if not interleaved else (q_ro[..., ::2], q_ro[..., 1::2])
-        re_cos = rearrange(cos, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(cos[:seqlen], "s d -> s 1 d")
-        re_sin = rearrange(sin, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(sin[:seqlen], "s d -> s 1 d")
 
-        rotary_emb.apply_rotary(q1, q2, re_cos, re_sin, q1, q2, False)
+        assert rotary_dim <= head_dim
+        assert seqlen <= rotary_seqlen
+        assert sin.shape == (rotary_seqlen, rotary_dim // 2)
 
-        k_ro = qkv[:, 1, :, :rotary_dim] if len(qkv.shape) == 4 else qkv[:, :, 1, :, :rotary_dim]
-        k1, k2 = k_ro.chunk(2, dim=-1) if not interleaved else (k_ro[..., ::2], k_ro[..., 1::2])
-        re_cos_k = (
-            rearrange(cos_k, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(cos_k[:seqlen], "s d -> s 1 d")
+        x_ro = x[..., :rotary_dim]
+        x1, x2 = (x_ro[..., ::2], x_ro[..., 1::2]) if interleaved else x_ro.chunk(2, dim=-1)
+
+        if in_place:
+            out, o1, o2 = x, x1, x2
+        else:
+            out = torch.empty_like(x)
+            out_ro = out[..., :rotary_dim]
+            o1, o2 = (out_ro[..., ::2], out_ro[..., 1::2]) if interleaved else out_ro.chunk(2, dim=-1)
+
+        _flash_apply_rotary_func(
+            x1,
+            x2,
+            rearrange(cos[:seqlen], "s d -> s 1 d"),
+            rearrange(sin[:seqlen], "s d -> s 1 d"),
+            o1,
+            o2,
+            False,
         )
-        re_sin_k = (
-            rearrange(sin_k, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(sin_k[:seqlen], "s d -> s 1 d")
-        )
 
-        rotary_emb.apply_rotary(k1, k2, re_cos_k, re_sin_k, k1, k2, False)
+        if rotary_dim < head_dim and not in_place:
+            out[..., rotary_dim:].copy_(x[..., rotary_dim:])
 
-        ctx.save_for_backward(cos, sin, cos_k, sin_k)
+        ctx.save_for_backward(cos, sin)
         ctx.interleaved = interleaved
-        return qkv
+        ctx.in_place = in_place
+        ctx.use_fused_rope = use_fused_rope
+
+        return out
 
     @staticmethod
-    def backward(ctx, dqkv):
-        cos, sin, cos_k, sin_k = ctx.saved_tensors
-        seqlen = None if len(dqkv.shape) == 4 else dqkv.shape[1]
+    def backward(ctx, do):
+        cos, sin = ctx.saved_tensors
+        *_, seqlen, _, head_dim = do.shape
         rotary_dim = cos.shape[-1]
         rotary_dim *= 2
-        dq_ro = dqkv[:, 0, :, :rotary_dim] if len(dqkv.shape) == 4 else dqkv[:, :, 0, :, :rotary_dim]
-        dq1, dq2 = dq_ro.chunk(2, dim=-1) if not ctx.interleaved else (dq_ro[..., ::2], dq_ro[..., 1::2])
-        re_cos = rearrange(cos, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(cos[:seqlen], "s d -> s 1 d")
-        re_sin = rearrange(sin, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(sin[:seqlen], "s d -> s 1 d")
 
-        rotary_emb.apply_rotary(dq1, dq2, re_cos, re_sin, dq1, dq2, True)
+        do_ro = do[..., :rotary_dim]
+        do1, do2 = (do_ro[..., ::2], do_ro[..., 1::2]) if ctx.interleaved else do_ro.chunk(2, dim=-1)
 
-        dk_ro = dqkv[:, 1, :, :rotary_dim] if len(dqkv.shape) == 4 else dqkv[:, :, 1, :, :rotary_dim]
-        dk1, dk2 = dk_ro.chunk(2, dim=-1) if not ctx.interleaved else (dk_ro[..., ::2], dk_ro[..., 1::2])
-        re_cos_k = (
-            rearrange(cos_k, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(cos_k[:seqlen], "s d -> s 1 d")
+        if ctx.in_place:
+            dx, dx1, dx2 = do, do1, do2
+        else:
+            dx = torch.empty_like(do)
+            dx_ro = dx[..., :rotary_dim]
+            dx1, dx2 = (dx_ro[..., ::2], dx_ro[..., 1::2]) if ctx.interleaved else dx_ro.chunk(2, dim=-1)
+
+        _flash_apply_rotary_func(
+            do1,
+            do2,
+            rearrange(cos[:seqlen], "s d -> s 1 d"),
+            rearrange(sin[:seqlen], "s d -> s 1 d"),
+            dx1,
+            dx2,
+            True,
         )
-        re_sin_k = (
-            rearrange(sin_k, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(sin_k[:seqlen], "s d -> s 1 d")
-        )
 
-        rotary_emb.apply_rotary(dk1, dk2, re_cos_k, re_sin_k, dk1, dk2, True)
+        if rotary_dim < head_dim and not ctx.in_place:
+            dx[..., rotary_dim:].copy_(do[..., rotary_dim:])
 
-        return dqkv, None, None, None, None, None
+        return dx, None, None, None, None
 
-apply_rotary_emb_qkv_ = ApplyRotaryEmbQKV_.apply
+def apply_rotary_emb(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False, in_place: bool = False
+):
+   
+    return ApplyRotaryEmb.apply(x, cos, sin, interleaved, in_place)
 
 class RotaryEmbedding(torch.nn.Module):
     """
@@ -124,12 +143,19 @@ class RotaryEmbedding(torch.nn.Module):
         self._cos_k_cached = None
         self._sin_k_cached = None
 
-    def _update_cos_sin_cache(self, x, indexes):
-        """x: (batch, seqlen, nheads, headdim) or (batch, seqlen, 3, nheads, headdim)"""
-        if not isinstance(indexes, int):
-            seqlen = indexes.max().item() + 1
+    def _update_cos_sin_cache(
+        self, x: torch.Tensor, indexes: Union[int, torch.Tensor] = 0, max_seqlen: Optional[int] = None
+    ):
+        """x: (batch, seqlen, nheads, headdim)"""
+        if max_seqlen is not None:
+            seqlen = max_seqlen
+        elif isinstance(indexes, int):
+            seqlen = indexes + x.shape[1]
         else:
-            seqlen = indexes + 1  # eval_forward
+            # Note that this statement may cause synchronization between CPU and GPU,
+            # so it's best to precompute and pass in max_seqlen ahead of time
+            seqlen = indexes.max().item()
+
         # Reset the tables if the sequence length has changed,
         # or if we're on a new device (possibly due to tracing for instance)
         if seqlen > self._seq_len_cached or self._cos_cached.device != x.device or self._cos_cached.dtype != x.dtype:
@@ -152,21 +178,75 @@ class RotaryEmbedding(torch.nn.Module):
                 self._cos_k_cached = (torch.cos(freqs) / scale).to(x.dtype)
                 self._sin_k_cached = (torch.sin(freqs) / scale).to(x.dtype)
 
-    def forward(self, qkv: torch.Tensor, **kwargs):
-        if kwargs.get("indexes", None) is not None:
-            return self._forward(qkv, kwargs.pop("indexes"))
-
-    def _forward(self, qkv: torch.Tensor, indexes=0) -> Tuple[torch.Tensor, torch.Tensor]:
-        self._update_cos_sin_cache(qkv, indexes)
-        if self.scale is None:
-            return apply_rotary_emb_qkv_(qkv, self._cos_cached[indexes], self._sin_cached[indexes])
+    def _get_slice(self, tensor: torch.Tensor, offsets: Union[int, torch.Tensor] = 0):
+        if isinstance(offsets, int):
+            return tensor[offsets:]
         else:
-            return apply_rotary_emb_qkv_(
-                qkv,
-                self._cos_cached[indexes],
-                self._sin_cached[indexes],
-                self._cos_k_cached[indexes],
-                self._sin_k_cached[indexes],
-            )
+            return tensor[offsets]
 
-    
+    def _convert_padding(
+        self, x: torch.Tensor, empties: torch.Tensor, convert_type: str = "left2right", in_place: bool = False
+    ):
+        # TODO: impl in_place = True.
+        assert not in_place, "in_place = True is NYI."
+        assert convert_type in ("left2right", "right2left"), f"Unknown convert type {convert_type}"
+
+        ret = x.clone()
+
+        for i in range(len(empties)):
+            if empties[i] == 0:
+                continue
+
+            if convert_type == "left2right":
+                ret[i][: -empties[i]] = x[i][empties[i] :]
+                ret[i][-empties[i] :] = x[i][: empties[i]]
+            else:  # right2left
+                ret[i][empties[i] :] = x[i][: -empties[i]]
+                ret[i][: empties[i]] = x[i][-empties[i] :]
+
+        return ret
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        offsets: Union[int, torch.Tensor] = 0,
+        max_seqlen: Optional[int] = None,
+        cache_type: str = "query",
+        interleaved: bool = False,
+        in_place: bool = False,
+        left_padding_mask: Optional[torch.Tensor] = None,
+    ):
+        """
+        Applies rotary position embeddings to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+            offsets (Union[int, torch.Tensor], optional): The sequence offsets for the input. Defaults to 0.
+            max_seqlen (Optional[int], optional): The maximum sequence length for caching. Defaults to None.
+            cache_type (str, optional): Specifies whether the cache is for 'query' or 'key'. Defaults to "query".
+            interleaved (bool, optional): Whether the input tensor is interleaved. Defaults to False.
+            in_place (bool, optional): Whether the operation should be done in-place. Defaults to False.
+            left_padding_mask (Optional[torch.Tensor], optional): A mask for left padding. Defaults to None.
+
+        Returns:
+            torch.Tensor: The tensor with applied rotary position embeddings.
+        """
+        assert cache_type in ("query", "key"), f"Unknown cache type {cache_type}"
+        assert isinstance(offsets, (int, torch.Tensor)), f"Invalid offsets type {type(offsets)}"
+
+        if left_padding_mask is not None:
+            empties = left_padding_mask[..., -1].sum(dim=-1)
+            x = self._convert_padding(x, empties, convert_type="left2right", in_place=in_place)
+
+        self._update_cos_sin_cache(x, offsets, max_seqlen)
+
+        cos_cached = self._cos_k_cached if cache_type == "key" and self.scale is not None else self._cos_cached
+        sin_cached = self._sin_k_cached if cache_type == "key" and self.scale is not None else self._sin_cached
+        ret = apply_rotary_emb(
+            x, self._get_slice(cos_cached, offsets), self._get_slice(sin_cached, offsets), interleaved, in_place
+        )
+
+        if left_padding_mask is not None:
+            ret = self._convert_padding(ret, empties, convert_type="right2left", in_place=in_place)
+
+        return ret
