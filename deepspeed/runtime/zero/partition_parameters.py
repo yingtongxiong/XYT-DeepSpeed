@@ -815,11 +815,15 @@ def _no_gather_coalesced(params: Iterable[Parameter]) -> AllGatherCoalescedHandl
 # Replaces all parameters in module with Scattered Parameters
 class Init(InsertPostInitMethodToModuleSubClasses):
     param_id = 0
+    # 切分param的阈值，如果param的参数量小于这个阈值，则不进行切分。因为尽管切分param能够减少memory，但是也会引入额外的通信
     param_persistence_threshold = get_config_default(DeepSpeedZeroConfig, "param_persistence_threshold")
+    # 用在ZeRO3-Offload, ZeRO-Infinity and ZeRO-Inference
+    # 保留在GPU中的最大model参数
     model_persistence_threshold = get_config_default(DeepSpeedZeroConfig, "model_persistence_threshold")
     num_persisted_parameters = 0
     num_persisted_elements = 0
     apply_param_persistence = False
+    # Override nn.Module apply function, for Stage 3.
     override_module_apply = get_config_default(DeepSpeedZeroConfig, "override_module_apply")
 
     def __init__(self,
