@@ -10,8 +10,10 @@ from torch.nn import functional as F
 from einops import rearrange
 
 # from flash_attn.layers.rotary import RotaryEmbedding
+from deepspeed.runtime.activation_checkpointing.checkpointing import checkpoint
 from flash_attn.modules.mha import FlashSelfAttention, FlashCrossAttention
 from embedding import RotaryEmbedding
+
 
 def scaled_init_method_normal(sigma: float = 1.0, num_layers: int = 1):
     """Init method based on N(0, sigma/sqrt(2*num_layers)."""
@@ -75,6 +77,26 @@ class FeedForward(nn.Module):
         w3_o = self.w3(x)
         out = self.w2(Silu(w1_o, w3_o))
         return out
+
+
+def convert_attn_args_to_kwargs(args, kwargs):
+
+    if len(args) == 0:
+        return kwargs
+
+    assert len(args) == 3, "args must be generate by convert_attn_kwargs_to_args function"
+
+    if args[0] is not None:
+        assert "cu_seqlens" not in kwargs, "repeated 'cu_seqlens' argument exists both in args and kwargs"
+        kwargs["cu_seqlens"] = args[0]
+    if args[1] is not None:
+        assert "indexes" not in kwargs, "repeated 'indexes' argument exists both in args and kwargs"
+        kwargs["indexes"] = args[1]
+    if args[2] is not None:
+        assert "max_seqlen" not in kwargs, "repeated 'max_seqlen' argument exists both in args and kwargs"
+        kwargs["max_seqlen"] = args[2]
+
+    return kwargs
 
 
 class MHA(nn.Module):
@@ -189,10 +211,12 @@ class InternLM1Decoder(nn.Module):
         use_scaled_init: bool = True,
         use_swiglu: bool = True,
         rope_base: int = 10000,
+        checkpoint: bool = False,
     ):
         super().__init__()
         # dropout selective checkpoint can only be enabled when checkpoint is disabled.
         self.layer_idx = layer_idx
+        self.checkpoint = checkpoint
 
         head_dim = hidden_size // num_attention_heads
 
@@ -261,8 +285,14 @@ class InternLM1Decoder(nn.Module):
                     else:
                         normal_(std=0.006 if "fc1" in name else 0.0015)(param.data)
 
-
     def forward(self, hidden_states, **kwargs):
+        if self.checkpoint:
+            args = (kwargs['cu_seqlens'], kwargs["indexes"], kwargs['max_seqlen'])
+            return checkpoint(self._forward, hidden_states, *args)
+        else:
+            return self._forward(hidden_states, **kwargs)
+
+    def _forward(self, hidden_states, *args, **kwargs):
         r"""Pass the input through the encoder layer.
 
         Args:
@@ -284,8 +314,10 @@ class InternLM1Decoder(nn.Module):
 
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
+    
+        attn_kwargs = convert_attn_args_to_kwargs(args, kwargs)
 
-        hidden_states = self.mixer(hidden_states, **kwargs)
+        hidden_states = self.mixer(hidden_states, **attn_kwargs)
 
         def _dropout_and_norm_ffn(_residual, _hidden_states):
             _dropped = self.dropout2(_hidden_states)
@@ -327,6 +359,7 @@ class InternLM1(nn.Module):
         use_scaled_init: bool = True,
         use_swiglu: bool = True,
         rope_base: int = 10000,
+        checkpoint: bool=False,
     ):
         super().__init__()
 
@@ -355,6 +388,7 @@ class InternLM1(nn.Module):
                     use_scaled_init=use_scaled_init,
                     use_swiglu=use_swiglu,
                     rope_base=rope_base,
+                    checkpoint=checkpoint,
                 )
                 for lid in range(num_layers)
             ]

@@ -25,22 +25,25 @@ def get_model(args, device):
             dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
             parallel_output=args.parallel_output,
             device=device,
+            checkpoint=args.activation_checkpoint,
         )
     else:
-        model = InternLM2(
-            num_layers=args.num_layers,
-            hidden_size=args.hidden_size,
-            num_attention_heads=args.num_attention_heads,
-            num_kv_attention_heads=args.num_kv_attention_heads,
-            vocab_size=args.vocab_size,
-            mlp_ratio=args.mlp_ratio,
-            no_bias=True,
-            first=True,
-            last=True,
-            dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
-            parallel_output=args.parallel_output,
-            device=device,
-        )
+        with deepspeed.zero.Init(config_dict_or_path="deepspeed_config.json"):
+            model = InternLM2(
+                num_layers=args.num_layers,
+                hidden_size=args.hidden_size,
+                num_attention_heads=args.num_attention_heads,
+                num_kv_attention_heads=args.num_kv_attention_heads,
+                vocab_size=args.vocab_size,
+                mlp_ratio=args.mlp_ratio,
+                no_bias=True,
+                first=True,
+                last=True,
+                dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
+                parallel_output=args.parallel_output,
+                device=device,
+                checkpoint=args.activation_checkpoint,
+            )
     return model
 
 def print_log(msg):
@@ -125,10 +128,11 @@ def parse_args():
     group_model.add_argument('--num_kv_attention_heads', type=int, default=8)
     group_model.add_argument('--vocab-size', type=int, default=50304)
     group_model.add_argument('--mlp-ratio', type=str, default=None)
-    group_model.add_argument('--parallel-output', type=bool, default=False)
+    group_model.add_argument('--parallel-output', action='store_true')
     group_model.add_argument('--dtype', type=str, default='torch.bfloat16')
-    group_model.add_argument('--profiling', type=bool, default=False)
+    group_model.add_argument('--profiling', action='store_true')
     group_model.add_argument('--model-type', type=str, default='internlm2')
+    group_model.add_argument('--activation-checkpoint', action='store_true')
     
     
     group_data = parser.add_argument_group(title='data')
@@ -137,8 +141,8 @@ def parse_args():
     group_data.add_argument('--micro-bsz', type=int, default=1)
     group_data.add_argument('--micro-num', type=int, default=1)
     group_data.add_argument('--rampup-batch-size', type=int, default=1)
-    group_data.add_argument('--fixed_random_dataset_seqlen', type=bool, default=True)
-    group_data.add_argument('--pack_sample_into_one', type=bool, default=True)
+    group_data.add_argument('--fixed_random_dataset_seqlen', action='store_true')
+    group_data.add_argument('--pack_sample_into_one', action='store_true')
     group_data.add_argument('--num-worker', type=int, default=4)
     
     parser = deepspeed.add_config_arguments(parser)

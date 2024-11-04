@@ -40,8 +40,8 @@ num_kv_attention_heads=8
 vocab_size=92544
 mlp_ratio=3.5
 dtype=torch.bfloat16
-parallel_output=False
 model_type=internlm1
+
 
 # InternLM2-70B
 # num_layers=80
@@ -51,7 +51,6 @@ model_type=internlm1
 # vocab_size=92544
 # mlp_ratio=3.5
 # dtype=torch.bfloat16
-# parallel_output=False
 # model_type=internlm2
 
 
@@ -65,8 +64,8 @@ MODEL_ARGS=" \
     --vocab-size ${vocab_size} \
     --mlp-ratio ${mlp_ratio} \
     --dtype ${dtype} \
-    --parallel-output ${parallel_output} \
     --model-type ${model_type} \
+    --activation-checkpoint \
 "
 
 # 数据相关的config
@@ -75,9 +74,8 @@ DATA_ARGS=" \
     --packed-length ${seq_len} \
     --micro-bsz ${micro_batch_size} \
     --micro-num ${gradient_accumulate_size} \
+    --fixed_random_dataset_seqlen \
     --rampup-batch-size 1 \
-    --fixed_random_dataset_seqlen True \
-    --pack_sample_into_one False \
     --num-worker 4 \
 "
 

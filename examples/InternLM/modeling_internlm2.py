@@ -11,7 +11,7 @@ from einops import rearrange
 from flash_attn.modules.mha import FlashSelfAttention, FlashCrossAttention
 from embedding import RotaryEmbedding
 from attention import SelfAttention
-
+from deepspeed.runtime.activation_checkpointing.checkpointing import checkpoint
 
 
 def normal_(mean: float = 0.0, std: float = 1.0):
@@ -233,7 +233,24 @@ class GQA(nn.Module):
         # wo
         return self.wo(rearrange(context, "b s h d -> b s (h d)"))
 
-    
+def convert_attn_args_to_kwargs(args, kwargs):
+
+    if len(args) == 0:
+        return kwargs
+
+    assert len(args) == 3, "args must be generate by convert_attn_kwargs_to_args function"
+
+    if args[0] is not None:
+        assert "cu_seqlens" not in kwargs, "repeated 'cu_seqlens' argument exists both in args and kwargs"
+        kwargs["cu_seqlens"] = args[0]
+    if args[1] is not None:
+        assert "indexes" not in kwargs, "repeated 'indexes' argument exists both in args and kwargs"
+        kwargs["indexes"] = args[1]
+    if args[2] is not None:
+        assert "max_seqlen" not in kwargs, "repeated 'max_seqlen' argument exists both in args and kwargs"
+        kwargs["max_seqlen"] = args[2]
+
+    return kwargs
 
 class InternLM2Decoder(nn.Module):
 
@@ -364,8 +381,16 @@ class InternLM2Decoder(nn.Module):
                         self.init_func(std=self.ffn_uplayer_init_std if "fc1" in name else self.ffn_other_init_std)(
                             param.data
                         )
-
+    
     def forward(self, hidden_states, residual, **kwargs):
+        if self.checkpoint:
+            args = (kwargs['cu_seqlens'], kwargs["indexes"], kwargs['max_seqlen'])
+            return checkpoint(self._forward, hidden_states, residual, *args)
+        else:
+            return self._forward(hidden_states, residual, **kwargs)
+    
+
+    def _forward(self, hidden_states, residual, *args, **kwargs):
         r"""Pass the input through the encoder layer.
 
         Args:
@@ -388,7 +413,8 @@ class InternLM2Decoder(nn.Module):
             if self.residual_in_fp32:
                 residual = residual.to(torch.float32)
 
-            hidden_states = self.attention(hidden_states, **kwargs)
+            attn_kwargs = convert_attn_args_to_kwargs(args, kwargs)
+            hidden_states = self.attention(hidden_states, **attn_kwargs)
 
             if not isinstance(self.feed_forward, nn.Identity):
                 if not self.fused_dropout_add_ln:
@@ -441,7 +467,7 @@ class InternLM2(nn.Module):
         drop_rate: float = 0.0,
         max_position_embeddings: int = 2048,
         dtype: torch.dtype = torch.float,
-        checkpoint: float = 0.0,
+        checkpoint: bool = False,
         layer_norm_epsilon: float = 1e-5,
         first: bool = False,
         last: bool = False,
@@ -472,7 +498,6 @@ class InternLM2(nn.Module):
         multiple_of: int = 256,
     ):
         super().__init__()
-
         checkpoint_layer_num = int(num_layers * checkpoint)
         self.embed_grad_scale = embed_grad_scale
         self.parallel_output = parallel_output
@@ -498,7 +523,7 @@ class InternLM2(nn.Module):
                     max_position_embeddings=max_position_embeddings,
                     dtype=dtype,
                     layer_norm_epsilon=layer_norm_epsilon,
-                    checkpoint=lid < checkpoint_layer_num,
+                    checkpoint=checkpoint,
                     layer_idx=lid + start_layer_idx,  # This parameter is used for caching during generation
                     use_dynamic_ntk_rope=use_dynamic_ntk_rope,
                     residual_in_fp32=residual_in_fp32,
