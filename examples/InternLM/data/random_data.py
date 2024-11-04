@@ -4,8 +4,6 @@
 import numpy as np
 from torch.utils.data import Dataset
 
-# from internlm.core.context.parallel_context import global_context as gpc
-
 
 class RandomDataset(Dataset):
     """
@@ -17,7 +15,7 @@ class RandomDataset(Dataset):
 
     """
 
-    def __init__(self, num_samples=10000, max_len=1024, fixed_seqlen: bool = False) -> None:
+    def __init__(self, num_samples=10000, max_len=1024, vocab_size=92544, fixed_seqlen: bool = False) -> None:
         super().__init__()
         rng = np.random.RandomState(1999)
         max_num = rng.randint(1, 30, size=(num_samples,))
@@ -30,7 +28,7 @@ class RandomDataset(Dataset):
                 while len(d) < max_len:
                     r *= 2
                     d = list(range(n)) * r
-            # r = r % gpc.config.model.vocab_size
+            r = r % vocab_size
             d = [n, r] + d
             d = d[:max_len]
             data.append(d)

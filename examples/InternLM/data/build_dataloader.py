@@ -13,16 +13,17 @@ def get_train_dataloader(data_cfg):
     train_ds = RandomDataset(
         num_samples=data_parallel_world_size * 500,
         max_len=data_cfg.seq_len,
+        vocab_size=data_cfg.vocab_size,
         fixed_seqlen=data_cfg.fixed_random_dataset_seqlen,
     )
     
     if data_cfg.pack_sample_into_one:
         train_ds = PackedDatasetWithoutCuSeqlen(
-            train_ds, max_length_per_sample=data_cfg.seq_len, packed_length=data_cfg.packed_length
+            train_ds, max_length_per_sample=data_cfg.seq_len, micro_bsz=data_cfg.micro_bsz, packed_length=data_cfg.packed_length
         )
     else:
         train_ds = PackedDatasetWithCut(
-            train_ds, max_length_per_sample=data_cfg.seq_len, packed_length=data_cfg.packed_length
+            train_ds, max_length_per_sample=data_cfg.seq_len, micro_bsz=data_cfg.micro_bsz, packed_length=data_cfg.packed_length
         )
 
     train_sampler = StaticBatchSampler(

@@ -76,6 +76,7 @@ class PackedDatasetWithoutCuSeqlen(Dataset):
         self,
         dataset,
         max_length_per_sample: int = 2048,
+        micro_bsz: int = 1,
         packed_length: int = 4096,
         debug=False,
     ):
@@ -92,6 +93,7 @@ class PackedDatasetWithoutCuSeqlen(Dataset):
         # Force a seed to be fixed to prevent problems caused by the seed not being restored when restarting
         self.seed = DEFAULT_SEED
         self.path = self.get_dataset_name()
+        self.micro_bsz = micro_bsz
 
         self._process_init()
 
@@ -223,12 +225,16 @@ class PackedDatasetWithCut(PackedDataset):
         self,
         dataset,
         max_length_per_sample: int = 2048,
+        micro_bsz: int = 1,
         packed_length: int = 4096,
+        use_packed_dataset: bool = True,
     ):
         super().__init__(dataset, max_length_per_sample, packed_length)
         self.path = self.get_dataset_name()
         self.sample_indices, self.len_samples_shuffled, self.acm_len_samples = self.accu_sample_len(seed=self.seed)
         self.num_tokens = sum(self.lengths)
+        self.micro_bsz = micro_bsz
+        self.use_packed_dataset = use_packed_dataset
 
     def get_dataset_name(self):
         return self.dataset.get_dataset_name()
@@ -249,7 +255,7 @@ class PackedDatasetWithCut(PackedDataset):
     def __len__(self):
         # Line 405 of document_to_sequence.py in metaseq is directly spliced,
         # without additional consideration of sos or eos
-        if gpc.config.data.use_packed_dataset:
+        if self.use_packed_dataset:
             n_packs = self.num_tokens // self.packed_length
             return n_packs
         return len(self.lengths)
@@ -326,7 +332,7 @@ class PackedDatasetWithCut(PackedDataset):
         return out
 
     def cal_pos_unpack(self, index):
-        pos = index + gpc.config.data["micro_bsz"]
+        pos = index + self.micro_bsz
         return index, pos
 
     def build_unpack(self, index):
