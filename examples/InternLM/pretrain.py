@@ -1,11 +1,11 @@
 import argparse
 import os
+import json
 
 import deepspeed
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-import torch.nn.functional as F
 
 from modeling_internlm import InternLM1
 from modeling_internlm2 import InternLM2
@@ -15,20 +15,56 @@ from data.process_data import get_batch_data
 from utils import get_torch_profiler
 
 def get_model(args, device):
-    if args.model_type == "internlm1":
-        model = InternLM1(
-            num_layers=args.num_layers,
-            hidden_size=args.hidden_size,
-            num_attention_heads=args.num_attention_heads,
-            vocab_size=args.vocab_size,
-            mlp_ratio=args.mlp_ratio,
-            dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
-            parallel_output=args.parallel_output,
-            device=device,
-            checkpoint=args.activation_checkpoint,
-        )
+    # 获取deepspeed zero stage
+    with open(args.deepspeed_config, 'r') as file:
+        ds_cfg = json.load(file)
+    zero_stage = ds_cfg["zero_optimization"]["stage"]
+    print_log(f">>>>>> {zero_stage=} >>>>>>")
+    if zero_stage == 3:
+        with deepspeed.zero.Init(config_dict_or_path=args.deepspeed_config):
+            if args.model_type == "internlm1":
+                model = InternLM1(
+                    num_layers=args.num_layers,
+                    hidden_size=args.hidden_size,
+                    num_attention_heads=args.num_attention_heads,
+                    vocab_size=args.vocab_size,
+                    mlp_ratio=args.mlp_ratio,
+                    dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
+                    parallel_output=args.parallel_output,
+                    device=device,
+                    checkpoint=args.activation_checkpoint,
+                )
+            else:
+                
+                    model = InternLM2(
+                        num_layers=args.num_layers,
+                        hidden_size=args.hidden_size,
+                        num_attention_heads=args.num_attention_heads,
+                        num_kv_attention_heads=args.num_kv_attention_heads,
+                        vocab_size=args.vocab_size,
+                        mlp_ratio=args.mlp_ratio,
+                        no_bias=True,
+                        first=True,
+                        last=True,
+                        dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
+                        parallel_output=args.parallel_output,
+                        device=device,
+                        checkpoint=args.activation_checkpoint,
+                    )
     else:
-        with deepspeed.zero.Init(config_dict_or_path="deepspeed_config.json"):
+        if args.model_type == "internlm1":
+            model = InternLM1(
+                num_layers=args.num_layers,
+                hidden_size=args.hidden_size,
+                num_attention_heads=args.num_attention_heads,
+                vocab_size=args.vocab_size,
+                mlp_ratio=args.mlp_ratio,
+                dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
+                parallel_output=args.parallel_output,
+                device=device,
+                checkpoint=args.activation_checkpoint,
+            )
+        else:
             model = InternLM2(
                 num_layers=args.num_layers,
                 hidden_size=args.hidden_size,
