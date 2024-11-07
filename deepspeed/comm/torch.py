@@ -390,7 +390,8 @@ class TorchBackend(Backend):
         if not required_torch_version(min_version=2.2):
             raise RuntimeError(f"Current torch version does not have device mesh"
                                f"api (torch.__version__: {torch.__version__})")
-        return torch.distributed.device_mesh.init_device_mesh(get_accelerator().current_device_name(),
+        return torch.distributed.device_mesh.init_device_mesh(#get_accelerator().current_device_name(),
+                                                              'cuda',
                                                               mesh_shape,
                                                               mesh_dim_names=mesh_dim_names)
 
