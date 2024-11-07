@@ -7,11 +7,9 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from modeling_internlm import InternLM1
-from modeling_internlm2 import InternLM2
-
 from data.build_dataloader import get_train_dataloader
 from data.process_data import get_batch_data
+from model.modeling_internlm2 import InternLM2
 from utils import get_torch_profiler
 
 def get_model(args, device):
@@ -20,51 +18,10 @@ def get_model(args, device):
         ds_cfg = json.load(file)
     zero_stage = ds_cfg["zero_optimization"]["stage"]
     print_log(f">>>>>> {zero_stage=} >>>>>>")
+    dtype = torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32
     if zero_stage == 3:
         with deepspeed.zero.Init(config_dict_or_path=args.deepspeed_config):
-            if args.model_type == "internlm1":
-                model = InternLM1(
-                    num_layers=args.num_layers,
-                    hidden_size=args.hidden_size,
-                    num_attention_heads=args.num_attention_heads,
-                    vocab_size=args.vocab_size,
-                    mlp_ratio=args.mlp_ratio,
-                    dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
-                    parallel_output=args.parallel_output,
-                    device=device,
-                    checkpoint=args.activation_checkpoint,
-                )
-            else:
-                
-                    model = InternLM2(
-                        num_layers=args.num_layers,
-                        hidden_size=args.hidden_size,
-                        num_attention_heads=args.num_attention_heads,
-                        num_kv_attention_heads=args.num_kv_attention_heads,
-                        vocab_size=args.vocab_size,
-                        mlp_ratio=args.mlp_ratio,
-                        no_bias=True,
-                        first=True,
-                        last=True,
-                        dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
-                        parallel_output=args.parallel_output,
-                        device=device,
-                        checkpoint=args.activation_checkpoint,
-                    )
-    else:
-        if args.model_type == "internlm1":
-            model = InternLM1(
-                num_layers=args.num_layers,
-                hidden_size=args.hidden_size,
-                num_attention_heads=args.num_attention_heads,
-                vocab_size=args.vocab_size,
-                mlp_ratio=args.mlp_ratio,
-                dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
-                parallel_output=args.parallel_output,
-                device=device,
-                checkpoint=args.activation_checkpoint,
-            )
-        else:
+
             model = InternLM2(
                 num_layers=args.num_layers,
                 hidden_size=args.hidden_size,
@@ -75,11 +32,31 @@ def get_model(args, device):
                 no_bias=True,
                 first=True,
                 last=True,
-                dtype=torch.bfloat16 if args.dtype == 'torch.bfloat16' else torch.float32,
+                dtype=dtype,
                 parallel_output=args.parallel_output,
                 device=device,
                 checkpoint=args.activation_checkpoint,
             )
+    else:
+        
+        model = InternLM2(
+            num_layers=args.num_layers,
+            hidden_size=args.hidden_size,
+            num_attention_heads=args.num_attention_heads,
+            num_kv_attention_heads=args.num_kv_attention_heads,
+            vocab_size=args.vocab_size,
+            mlp_ratio=args.mlp_ratio,
+            no_bias=True,
+            first=True,
+            last=True,
+            embed_grad_scale=1,
+            dtype=dtype,
+            parallel_output=args.parallel_output,
+            device=device,
+            checkpoint=args.activation_checkpoint,
+        )
+    
+    model = model.to(device).to(dtype)
     return model
 
 def print_log(msg):
@@ -103,11 +80,13 @@ def pretrain(args):
     # print(f"xyt debug after building model device = {device}", flush=True)
 
     print_log(">>initialize deepspeed...")
+    # mesh_params = (2, 4)
     model, _, _, _ = deepspeed.initialize(
                         args=args,
                         model=model,
                         model_parameters=model.parameters(),
-                        dist_init_required=True)
+                        dist_init_required=True,)
+                        # mesh_param=mesh_params)
     print_log(">>after initialize deepspeed...")
     # print(f"xyt debug model device = {model.device}", flush=True)
 
@@ -133,12 +112,15 @@ def pretrain(args):
             input_ids, labels, kwargs = get_batch_data(batch, model.device)
             
             # forward
+            # logits, moe_losses = model(input_ids=input_ids, **kwargs)
             logits = model(input_ids=input_ids, **kwargs)
+            # moe_loss = sum(moe_losses) * 1
             
             # compute loss
             shift_logits = logits.contiguous().view(-1, logits.size(-1))
             shift_labels = labels.contiguous().view(-1)
             loss = loss_fn(shift_logits, shift_labels)
+            # loss += moe_loss
 
             # backward
             model.backward(loss)
@@ -148,7 +130,7 @@ def pretrain(args):
             
             print_log(f"step = {idx}, {loss=}")
             
-            if idx % 3 == 0:
+            if idx % 2 == 0:
                 prof.step()
         
 
@@ -177,9 +159,19 @@ def parse_args():
     group_data.add_argument('--micro-bsz', type=int, default=1)
     group_data.add_argument('--micro-num', type=int, default=1)
     group_data.add_argument('--rampup-batch-size', type=int, default=1)
-    group_data.add_argument('--fixed_random_dataset_seqlen', action='store_true')
-    group_data.add_argument('--pack_sample_into_one', action='store_true')
+    group_data.add_argument('--fixed-random-dataset-seqlen', action='store_true')
+    group_data.add_argument('--pack-sample-into-one', action='store_true')
     group_data.add_argument('--num-worker', type=int, default=4)
+    
+    
+    group_moe = parser.add_argument_group(title='moe')
+    group_moe.add_argument('--num-experts', type=int, default=1)
+    group_moe.add_argument('--ep-size', type=int, default=1)
+    group_moe.add_argument('--top-k', type=int, default=2)
+    group_moe.add_argument('--capacity-factor', type=int, default=1)
+    group_moe.add_argument('--moe-loss-coeff', type=float, default=0.1)
+    group_moe.add_argument('--enable-expert-tensor-parallelism', action='store_true')
+    
     
     parser = deepspeed.add_config_arguments(parser)
     

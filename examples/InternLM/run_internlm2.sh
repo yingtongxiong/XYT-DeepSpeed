@@ -27,10 +27,11 @@ MASTER_PORT=7880
 NNODES=$SLURM_NNODES
 
 # data相关config
-micro_batch_size=1
+micro_batch_size=2
 gradient_accumulate_size=1
 
 seq_len=4096
+packed_len=$((${micro_batch_size} * ${seq_len}))
 
 # InternLM2-7B
 num_layers=32
@@ -40,7 +41,7 @@ num_kv_attention_heads=8
 vocab_size=92544
 mlp_ratio=3.5
 dtype=torch.bfloat16
-model_type=internlm1
+model_type=internlm2
 
 
 # InternLM2-70B
@@ -65,19 +66,19 @@ MODEL_ARGS=" \
     --mlp-ratio ${mlp_ratio} \
     --dtype ${dtype} \
     --model-type ${model_type} \
-    --activation-checkpoint \
 "
 
 # 数据相关的config
 DATA_ARGS=" \
     --seq-len ${seq_len} \
-    --packed-length ${seq_len} \
+    --packed-length ${packed_len} \
     --micro-bsz ${micro_batch_size} \
     --micro-num ${gradient_accumulate_size} \
-    --fixed_random_dataset_seqlen \
+    --fixed-random-dataset-seqlen \
     --rampup-batch-size 1 \
     --num-worker 4 \
 "
+
 
 # deepspeed相关的config
 DEEPSPEED_ARGS="\
@@ -87,4 +88,4 @@ DEEPSPEED_ARGS="\
 
 
 torchrun --nproc_per_node 8 --nnodes $NNODES --node_rank $SLURM_PROCID --master_addr $MASTER_ADDR --master_port $MASTER_PORT \
-pretrain.py $MODEL_ARGS $DATA_ARGS $DEEPSPEED_ARGS
+pretrain_internlm2.py $MODEL_ARGS $DATA_ARGS $DEEPSPEED_ARGS

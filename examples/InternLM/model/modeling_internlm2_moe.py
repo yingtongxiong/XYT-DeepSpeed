@@ -12,6 +12,8 @@ from flash_attn.modules.mha import FlashSelfAttention, FlashCrossAttention
 from embedding import RotaryEmbedding
 from attention import SelfAttention
 from deepspeed.runtime.activation_checkpointing.checkpointing import checkpoint
+from deepspeed.sequence.layer import DistributedAttention
+from deepspeed.moe.layer import MoE
 
 
 def normal_(mean: float = 0.0, std: float = 1.0):
@@ -177,6 +179,13 @@ class GQA(nn.Module):
         self.inner_attn = SelfAttention(
             causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout
         )
+        
+        # self.inner_attn = DistributedAttention(
+        #     local_attention=self.inner_attn,
+        #     scatter_idx=2,
+        #     gather_idx=1,
+        #     sp_stream=torch.cuda.Stream(),
+        # )
         self.inner_cross_attn = FlashCrossAttention(
             causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout
         )
@@ -213,7 +222,7 @@ class GQA(nn.Module):
                 k, offsets=indexes, max_seqlen=4096, cache_type="key", interleaved=self.interleaved
             )
             
-        kv = torch.concat([k.unsqueeze(2), v.unsqueeze(2)], dim=2)
+        # kv = torch.concat([k.unsqueeze(2), v.unsqueeze(2)], dim=2)
 
         kwargs["max_seqlen_q"] = kwargs["max_seqlen"]
         kwargs["max_seqlen_k"] = kwargs["max_seqlen"]
@@ -224,7 +233,8 @@ class GQA(nn.Module):
 
         # self attention
         # q, kv = q.squeeze(dim=0), kv.squeeze(dim=0)
-        context = self.inner_attn(q, kv, **kwargs)
+        # context = self.inner_attn(q, kv, **kwargs)
+        context = self.inner_attn(q, k, v, **kwargs)
 
         # qkv = qkv.squeeze(0)
         # context = self.inner_attn(qkv, **kwargs)
@@ -286,6 +296,7 @@ class InternLM2Decoder(nn.Module):
         rope_base: int = 10000,
         mlp_layer_fusion: bool = False,
         multiple_of: int = 256,
+        **kwargs,
     ):
         super().__init__()
         self.checkpoint = checkpoint
@@ -329,7 +340,7 @@ class InternLM2Decoder(nn.Module):
         self.attention_norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon, device=device)
         self.ffn_norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon, device=device)
 
-        self.feed_forward = FeedForward(
+        inner_feed_forward = FeedForward(
             hidden_size,
             int(hidden_size * mlp_ratio),
             out_features=hidden_size,
@@ -338,6 +349,16 @@ class InternLM2Decoder(nn.Module):
             dtype=dtype,
             multiple_of=multiple_of,
         )
+        
+        self.feed_forward = MoE(
+                                hidden_size=hidden_size,
+                                expert=inner_feed_forward,
+                                **kwargs)
+                                # num_experts=8,
+                                # ep_size=8,
+                                # k=2,
+                                # capacity_factor=1,
+                                # eval_capacity_factor=1)
 
         self.use_swiglu = use_swiglu
         self.use_scaled_init = use_scaled_init
@@ -431,26 +452,12 @@ class InternLM2Decoder(nn.Module):
 
                     if self.residual_in_fp32:
                         residual = residual.to(torch.float32)
-                hidden_states = self.feed_forward(hidden_states)
+                hidden_states, moe_loss, *_ = self.feed_forward(hidden_states)
 
-            return hidden_states + residual
+            return hidden_states + residual, moe_loss
         else:
-            assert residual is None
-
-            mixer_out = self.attention(hidden_states, **kwargs)
-            if self.return_residual:  # mixer out is actually a pair here
-                mixer_out, hidden_states = mixer_out
-            hidden_states = self.attention_norm(self.dropout1(mixer_out) + hidden_states).to(
-                dtype=self.attention_norm.weight.dtype
-            )
-            if not isinstance(self.feed_forward, nn.Identity):
-                mlp_out = self.feed_forward(hidden_states)
-                if self.return_residual:  # mlp out is actually a pair here
-                    mlp_out, hidden_states = mlp_out
-                hidden_states = self.ffn_norm((self.dropout2(mlp_out)) + hidden_states).to(
-                    dtype=self.ffn_norm.weight.dtype
-                )
-            return hidden_states
+            raise NotImplementedError("Post-norm is not supported yet.")
+        return hidden_states
 
 
 class InternLM2(nn.Module):
@@ -496,6 +503,7 @@ class InternLM2(nn.Module):
         norm_head: bool = False,
         mlp_layer_fusion: bool = False,
         multiple_of: int = 256,
+        **kwargs,
     ):
         super().__init__()
         checkpoint_layer_num = int(num_layers * checkpoint)
@@ -544,6 +552,7 @@ class InternLM2(nn.Module):
                     rope_base=rope_base,
                     mlp_layer_fusion=mlp_layer_fusion,
                     multiple_of=multiple_of,
+                    **kwargs,
                 )
                 for lid in range(num_layers)
             ]
@@ -575,16 +584,19 @@ class InternLM2(nn.Module):
                 hidden_states = (
                     self.embed_grad_scale * hidden_states + (1 - self.embed_grad_scale) * hidden_states.detach()
                 )
-
+        
+        moe_losses = []
         for _, block in enumerate(self.layers):
-            hidden_states = block(hidden_states, residual=None, **kwargs)
+            hidden_states, moe_loss = block(hidden_states, residual=None, **kwargs)
+            if moe_loss is not None:
+                moe_losses.append(moe_loss)
 
         if hasattr(self, "norm"):
             hidden_states = self.norm(hidden_states.to(self.norm.weight.dtype))
         if hasattr(self, "output"):
             hidden_states = self.output(hidden_states)
 
-        return hidden_states
+        return hidden_states, moe_losses
 
 
     

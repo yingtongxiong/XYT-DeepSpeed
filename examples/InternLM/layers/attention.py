@@ -30,42 +30,42 @@ class SelfAttention(nn.Module):
         self.layer_idx = layer_idx
 
     
-    def _qkvsplited_forward(
-        self,
-        q,
-        k,
-        v,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        softmax_scale=None,
-        causal=False,
-    ):
-        softmax_scale = self.softmax_scale if softmax_scale is None else softmax_scale
-        causal = self.causal if causal is None else causal
+    # def forward(
+    #     self,
+    #     q,
+    #     k,
+    #     v,
+    #     cu_seqlens_q,
+    #     cu_seqlens_k,
+    #     max_seqlen_q,
+    #     max_seqlen_k,
+    #     softmax_scale=None,
+    #     causal=False,
+    # ):
+    #     softmax_scale = self.softmax_scale if softmax_scale is None else softmax_scale
+    #     causal = self.causal if causal is None else causal
 
 
-        dropout =  self.dropout.p
+    #     dropout =  self.dropout.p
 
-        # compatible data format: [1, packelen, 3, n_head, headim]
-        q, k, v = q.squeeze(dim=0), k.squeeze(dim=0), v.squeeze(dim=0)
+    #     # compatible data format: [1, packelen, 3, n_head, headim]
+    #     q, k, v = q.squeeze(dim=0), k.squeeze(dim=0), v.squeeze(dim=0)
 
-        # input_idxs: 0: q, 1: k, 2: v
-        output = _flash_varlen_qkvsplited_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout,
-            softmax_scale,
-            causal,
-        )
+    #     # input_idxs: 0: q, 1: k, 2: v
+    #     output = _flash_varlen_qkvsplited_func(
+    #         q,
+    #         k,
+    #         v,
+    #         cu_seqlens_q,
+    #         cu_seqlens_k,
+    #         max_seqlen_q,
+    #         max_seqlen_k,
+    #         dropout,
+    #         softmax_scale,
+    #         causal,
+    #     )
 
-        return output.unsqueeze(dim=0)
+    #     return output.unsqueeze(dim=0)
     
 
     def forward(

@@ -15,7 +15,7 @@ class RandomDataset(Dataset):
 
     """
 
-    def __init__(self, num_samples=10000, max_len=1024, vocab_size=92544, fixed_seqlen: bool = False) -> None:
+    def __init__(self, num_samples=10000, max_len=1024, fixed_seqlen: bool = False) -> None:
         super().__init__()
         rng = np.random.RandomState(1999)
         max_num = rng.randint(1, 30, size=(num_samples,))
@@ -28,7 +28,7 @@ class RandomDataset(Dataset):
                 while len(d) < max_len:
                     r *= 2
                     d = list(range(n)) * r
-            r = r % vocab_size
+
             d = [n, r] + d
             d = d[:max_len]
             data.append(d)
@@ -40,7 +40,7 @@ class RandomDataset(Dataset):
     def __getitem__(self, index):
         d = self.data[index]
         input_ids = np.array(d, dtype=int)
-        return {"tokens": list(input_ids), "type_id": 0}
+        return {"tokens": list(input_ids), "type_id": 0, "subset_id": 0}
 
     def get_dataset_name(self):
         return "dummy_path/dummy_lang/dummy_ds/train.bin"

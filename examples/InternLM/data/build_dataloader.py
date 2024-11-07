@@ -11,9 +11,9 @@ def get_train_dataloader(data_cfg):
 
     data_parallel_world_size = dist.get_world_size()
     train_ds = RandomDataset(
-        num_samples=data_parallel_world_size * 500,
+        num_samples=1024 * max(data_parallel_world_size, 1),
         max_len=data_cfg.seq_len,
-        vocab_size=data_cfg.vocab_size,
+        # vocab_size=data_cfg.vocab_size,
         fixed_seqlen=data_cfg.fixed_random_dataset_seqlen,
     )
     
