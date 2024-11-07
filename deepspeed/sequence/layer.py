@@ -113,7 +113,7 @@ class _SeqAllToAll(torch.autograd.Function):
         else:
             # overlap communication path
             if not is_fwd and type == 'o':
-                assert ctx.stream != None
+                assert ctx.stream is not None
                 res = single_all_to_all(input, scatter_idx, gather_idx, batch_dim_idx, group, False)
                 get_accelerator().current_stream().wait_stream(ctx.stream)
                 del ctx.stream.activation_buffer_list
