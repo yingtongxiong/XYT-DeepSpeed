@@ -112,15 +112,12 @@ def pretrain(args):
             input_ids, labels, kwargs = get_batch_data(batch, model.device)
             
             # forward
-            # logits, moe_losses = model(input_ids=input_ids, **kwargs)
             logits = model(input_ids=input_ids, **kwargs)
-            # moe_loss = sum(moe_losses) * 1
             
             # compute loss
             shift_logits = logits.contiguous().view(-1, logits.size(-1))
             shift_labels = labels.contiguous().view(-1)
             loss = loss_fn(shift_logits, shift_labels)
-            # loss += moe_loss
 
             # backward
             model.backward(loss)
@@ -162,15 +159,6 @@ def parse_args():
     group_data.add_argument('--fixed-random-dataset-seqlen', action='store_true')
     group_data.add_argument('--pack-sample-into-one', action='store_true')
     group_data.add_argument('--num-worker', type=int, default=4)
-    
-    
-    group_moe = parser.add_argument_group(title='moe')
-    group_moe.add_argument('--num-experts', type=int, default=1)
-    group_moe.add_argument('--ep-size', type=int, default=1)
-    group_moe.add_argument('--top-k', type=int, default=2)
-    group_moe.add_argument('--capacity-factor', type=int, default=1)
-    group_moe.add_argument('--moe-loss-coeff', type=float, default=0.1)
-    group_moe.add_argument('--enable-expert-tensor-parallelism', action='store_true')
     
     
     parser = deepspeed.add_config_arguments(parser)
