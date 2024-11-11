@@ -14,7 +14,23 @@ from layers.utils import dropout_and_norm_residual
 from layers.gqa import GQA
 from layers.mlp import FeedForward
 
+def convert_attn_args_to_kwargs(args, kwargs):
+    if len(args) == 0:
+        return kwargs
 
+    assert len(args) == 3, "args must be generate by convert_attn_kwargs_to_args function"
+
+    if args[0] is not None:
+        assert "cu_seqlens" not in kwargs, "repeated 'cu_seqlens' argument exists both in args and kwargs"
+        kwargs["cu_seqlens"] = args[0]
+    if args[1] is not None:
+        assert "indexes" not in kwargs, "repeated 'indexes' argument exists both in args and kwargs"
+        kwargs["indexes"] = args[1]
+    if args[2] is not None:
+        assert "max_seqlen" not in kwargs, "repeated 'max_seqlen' argument exists both in args and kwargs"
+        kwargs["max_seqlen"] = args[2]
+
+    return kwargs
 
 class InternLM2Decoder(nn.Module):
 
@@ -176,8 +192,8 @@ class InternLM2Decoder(nn.Module):
                 use_reentrant=True,
             )
 
-            # attn_kwargs = convert_attn_args_to_kwargs(args, kwargs)
-            attn_kwargs = kwargs
+            attn_kwargs = convert_attn_args_to_kwargs(args, kwargs)
+            # attn_kwargs = kwargs
             hidden_states = self.attention(hidden_states, **attn_kwargs)
 
             if not isinstance(self.feed_forward, nn.Identity):

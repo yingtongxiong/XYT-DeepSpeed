@@ -34,25 +34,25 @@ seq_len=4096
 packed_len=$((${micro_batch_size} * ${seq_len}))
 
 # InternLM2-7B
-num_layers=32
-hidden_size=4096
-num_attention_heads=32
-num_kv_attention_heads=8
-vocab_size=92544
-mlp_ratio=3.5
-dtype=torch.bfloat16
-model_type=internlm2
-
-
-# InternLM2-70B
-# num_layers=80
-# hidden_size=8192
-# num_attention_heads=64
+# num_layers=32
+# hidden_size=4096
+# num_attention_heads=32
 # num_kv_attention_heads=8
 # vocab_size=92544
 # mlp_ratio=3.5
 # dtype=torch.bfloat16
 # model_type=internlm2
+
+
+# InternLM2-70B
+num_layers=80
+hidden_size=8192
+num_attention_heads=64
+num_kv_attention_heads=8
+vocab_size=92544
+mlp_ratio=3.5
+dtype=torch.bfloat16
+model_type=internlm2
 
 
 
@@ -66,6 +66,8 @@ MODEL_ARGS=" \
     --mlp-ratio ${mlp_ratio} \
     --dtype ${dtype} \
     --model-type ${model_type} \
+    --activation-checkpoint \
+    --profiling \
 "
 
 # 数据相关的config

@@ -1,5 +1,5 @@
 {
-    "train_batch_size": 8,
+    "train_batch_size": 64,
     "steps_per_print": 1,
     "gradient_accumulation_steps": 1,
     "optimizer": {
@@ -17,12 +17,13 @@
         "enabled": true
     },
     "zero_optimization": {
-        "stage": 2,
+        "stage": 3,
         "overlap_comm": true,
-        "reduce_bucket_size": 5e6,
+        "reduce_bucket_size": 5e7,
         "contiguous_gradients": true,
         "use_multi_rank_bucket_allreduce": true,
-        "allgather_partitions": true
+        "allgather_partitions": true,
+        "zero_hpz_partition_size": 1
     },
     "activation_checkpointing": {
         "partitioned_activations": false,
